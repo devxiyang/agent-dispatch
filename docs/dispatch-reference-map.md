@@ -6,33 +6,33 @@ This file maps the original reference implementation to the new repository struc
 
 Reference root:
 
-- `/Users/devxiyang/code/tmp/dispatch`
+- upstream `dispatch` repository clone
 
 ## Reference to Local Mapping
 
 - Reference skill prompt:
-  `/Users/devxiyang/code/tmp/dispatch/skills/dispatch/SKILL.md`
+  `skills/dispatch/SKILL.md` in the upstream reference repo
   ->
-  [prompts/dispatcher-system.md](/Users/devxiyang/code/sideproject/agent-dispatch/prompts/dispatcher-system.md)
+  [prompts/dispatcher-system.md](../prompts/dispatcher-system.md)
 
 - Reference worker prompt section:
-  `/Users/devxiyang/code/tmp/dispatch/skills/dispatch/SKILL.md`
+  `skills/dispatch/SKILL.md` in the upstream reference repo
   ->
-  [prompts/worker-template.md](/Users/devxiyang/code/sideproject/agent-dispatch/prompts/worker-template.md)
+  [prompts/worker-template.md](../prompts/worker-template.md)
 
 - Reference first-run, config, recovery, and mailbox-related notes:
-  `/Users/devxiyang/code/tmp/dispatch/skills/dispatch/references/*.md`
+  `skills/dispatch/references/*.md` in the upstream reference repo
   ->
-  [docs/dispatch-flows.md](/Users/devxiyang/code/sideproject/agent-dispatch/docs/dispatch-flows.md)
+  [docs/dispatch-flows.md](dispatch-flows.md)
 
 - Reference architecture and README narrative:
-  `/Users/devxiyang/code/tmp/dispatch/docs/*.md`
+  `docs/*.md` in the upstream reference repo
   ->
-  [README.md](/Users/devxiyang/code/sideproject/agent-dispatch/README.md)
+  [README.md](../README.md)
   plus the local runtime implementation in:
-  [dispatch-core](/Users/devxiyang/code/sideproject/agent-dispatch/crates/dispatch-core/src/model.rs)
+  [dispatch-core](../crates/dispatch-core/src/model.rs)
   and
-  [dispatch-cli executor](/Users/devxiyang/code/sideproject/agent-dispatch/crates/dispatch-cli/src/executor.rs)
+  [dispatch-cli executor](../crates/dispatch-cli/src/executor.rs)
 
 ## Important Adaptations
 

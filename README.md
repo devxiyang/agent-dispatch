@@ -9,6 +9,12 @@ Rust workspace for a durable task dispatcher that can drive multiple coding-agen
 
 The design target is not just "spawn a worker", but "persist enough state to recover and continue work later".
 
+The project should be read as a general-purpose prompt + CLI tool:
+
+- prompts define host and worker behavior
+- `dispatch-cli` exposes the durable command surface
+- optional host adapters can wrap the CLI for specific environments
+
 ## Goals
 
 - Persist task state to disk under `.dispatch/tasks/<task-id>/`
@@ -26,12 +32,13 @@ The design target is not just "spawn a worker", but "persist enough state to rec
   Backend traits plus adapters for `codex`, `claude`, `pi`, and `cursor-agent`.
 - `crates/dispatch-cli`
   CLI for `init`, `run`, `status`, `resume`, and `events`.
-- `integrations/pi-dispatch-host`
-  `pi` host extension that exposes `/dispatch` commands and renders task status inside `pi`.
+- `integrations/`
+  Optional host adapters. These are examples and convenience layers over `dispatch-cli`, not the core product boundary.
 - `prompts`
   First-class dispatcher and worker prompt assets derived from the reference project.
 - `docs`
   Flow specs and mapping notes that bring the full reference process into this repo.
+  Includes a host-neutral integration contract for any calling agent.
 
 ## Persistence Model
 
@@ -51,7 +58,7 @@ Each task gets a dedicated directory:
       outputs/
 ```
 
-`task.json` is the canonical state. `plan.md` is the human-readable mirror. `events.jsonl` is append-only.
+`task.json` is the canonical state. `events.jsonl` is append-only. `plan.md` is a worker-owned working artifact, not the runtime source of truth.
 
 `mailbox/` is the worker-to-user handoff channel:
 
@@ -86,6 +93,8 @@ outputs/
 
 ## CLI Flow
 
+Most operational commands support `--json` so a host prompt can treat `dispatch` as a stable command subsystem instead of scraping prose.
+
 - `dispatch init`
   Create the root task store.
 - `dispatch template`
@@ -93,7 +102,7 @@ outputs/
 - `dispatch ready`
   Load config and report dispatcher readiness without starting a task.
 - `dispatch route --prompt "..."`
-  Classify a request as warm-up, config request, or task request, and suggest the next CLI action.
+  Advisory classifier for warm-up, config request, or task request. Hosts may use it as a suggestion helper instead of treating it as an authoritative router.
 - `dispatch config show`
   Inspect the current explicit backend/model/alias mapping.
 - `dispatch config add-backend|remove-backend`
@@ -108,6 +117,10 @@ outputs/
   Show installed status and capability flags for each backend.
 - `dispatch run`
   Persist a task from an inline prompt, `prompt.md`, or `plan.md`, then execute it by default.
+- `dispatch list`
+  Show recent tasks in a compact summary view.
+- `dispatch inspect`
+  Show task state, pending mailbox questions, and recent events in one call.
 - `dispatch resume`
   Reuse the persisted session reference and execute the next turn by default.
 - `dispatch status`
@@ -130,11 +143,9 @@ outputs/
 
 When `--mode auto` is used:
 
-- inline exploratory prompts route to `discuss`
-- inline concrete one-shot prompts can route to `direct`
-- larger inline prompts route to `plan`
-- `prompt.md` defaults to `direct`
-- `plan.md` defaults to `plan`
+- `plan.md` inputs route to `plan`
+- `prompt.md` inputs route to `direct`
+- inline prompts default to `direct` so the host prompt remains in control
 
 Input sources:
 
@@ -147,21 +158,43 @@ Input sources:
 
 Default task root is always `cwd/.dispatch` unless `--root` is set explicitly.
 
-## Pi Host Extension
+## Host Integrations
 
-The repository now includes a `pi` host extension at [integrations/pi-dispatch-host/index.ts](/Users/devxiyang/code/sideproject/agent-dispatch/integrations/pi-dispatch-host/index.ts).
+`dispatch-cli` is the primary tool surface.
+
+Host integrations are optional wrappers that help a specific coding agent invoke the CLI more ergonomically.
+
+The host-neutral integration contract is documented at [host-integration-contract.md](docs/host-integration-contract.md).
+Adapter-specific guidance lives in [integrations/README.md](integrations/README.md).
+
+Minimal generic flow:
+
+```text
+dispatch --json ready
+dispatch --json run --prompt "review auth flow" --mode direct
+dispatch --json inspect <task-id>
+dispatch --json questions <task-id>
+dispatch --json answer <task-id> --message "..."
+dispatch --json resume <task-id> --message "continue with the user's answer"
+```
+
+The repository currently includes one adapter example for `pi`.
+
+### Pi Host Extension
+
+The repository now includes a `pi` host extension at `integrations/pi-dispatch-host/index.ts`.
 
 Development load:
 
 ```bash
-pi -e /Users/devxiyang/code/sideproject/agent-dispatch/integrations/pi-dispatch-host/index.ts
+pi -e /path/to/agent-dispatch/integrations/pi-dispatch-host/index.ts
 ```
 
 Global install:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions/dispatch
-cp /Users/devxiyang/code/sideproject/agent-dispatch/integrations/pi-dispatch-host/index.ts ~/.pi/agent/extensions/dispatch/index.ts
+cp /path/to/agent-dispatch/integrations/pi-dispatch-host/index.ts ~/.pi/agent/extensions/dispatch/index.ts
 ```
 
 The extension resolves the dispatcher in this order:
@@ -175,7 +208,7 @@ The extension resolves the dispatcher in this order:
 For a copied global extension, set one of these first:
 
 ```bash
-export DISPATCH_WORKSPACE=/Users/devxiyang/code/sideproject/agent-dispatch
+export DISPATCH_WORKSPACE=/path/to/agent-dispatch
 # or
 export DISPATCH_BIN=/absolute/path/to/dispatch-cli
 ```
@@ -189,6 +222,8 @@ Supported commands inside `pi`:
 - `/dispatch ready`
 - `/dispatch config show`
 - `/dispatch set default to sonnet`
+- `/dispatch list`
+- `/dispatch inspect <task-id>`
 - `/dispatch status [task-id]`
 - `/dispatch questions [task-id]`
 - `/dispatch events [task-id]`
@@ -198,6 +233,8 @@ Supported commands inside `pi`:
 
 The extension persists the last selected task in the `pi` session via `appendEntry()`, restores it on session start/tree navigation, and updates `ctx.ui.setStatus()` plus a small widget with the current task state.
 It also routes empty requests to readiness checks and can translate simple config requests such as `set default to sonnet` into the corresponding `dispatch config ...` command.
+
+Nothing in the core runtime depends on `pi`. Other hosts can integrate by invoking `dispatch-cli` with `--json` and treating it as a command subsystem.
 
 ## Test Coverage
 
@@ -216,15 +253,16 @@ The repository includes both unit tests and end-to-end tests:
 
 ## Prompt and Flow Assets
 
-The complete reference behavior from `/Users/devxiyang/code/tmp/dispatch` is now landed in repository assets:
+The complete reference behavior from the upstream `dispatch` project is now landed in repository assets:
 
-- [prompts/dispatcher-system.md](/Users/devxiyang/code/sideproject/agent-dispatch/prompts/dispatcher-system.md)
-- [prompts/worker-template.md](/Users/devxiyang/code/sideproject/agent-dispatch/prompts/worker-template.md)
-- [docs/dispatch-flows.md](/Users/devxiyang/code/sideproject/agent-dispatch/docs/dispatch-flows.md)
-- [docs/dispatch-reference-map.md](/Users/devxiyang/code/sideproject/agent-dispatch/docs/dispatch-reference-map.md)
+- [prompts/dispatcher-system.md](prompts/dispatcher-system.md)
+- [prompts/worker-template.md](prompts/worker-template.md)
+- [docs/dispatch-flows.md](docs/dispatch-flows.md)
+- [docs/dispatch-reference-map.md](docs/dispatch-reference-map.md)
+- [docs/host-integration-contract.md](docs/host-integration-contract.md)
 
 These files are now part of runtime behavior:
 
-- worker prompts are rendered from [worker-template.md](/Users/devxiyang/code/sideproject/agent-dispatch/prompts/worker-template.md), not from an inline hardcoded string
+- worker prompts are rendered from [worker-template.md](prompts/worker-template.md), not from an inline hardcoded string
 - mailbox flow and recovery semantics are exercised by unit tests and e2e tests
 - config is editable through explicit CLI commands instead of relying on heuristic model-family routing

@@ -5,13 +5,18 @@ Replace `{task_id}` with the actual task id.
 Append a task-specific context block before the final completion instruction.
 
 ```text
-You have a plan file at .dispatch/tasks/{task_id}/plan.md containing a checklist.
-Work through it from top to bottom.
+You have a plan file at .dispatch/tasks/{task_id}/plan.md.
+It may already contain a checklist, or it may start as a task brief that you need to turn into a working plan.
 
-For each item:
+Before doing substantial work:
+- read the current plan artifact
+- if it is not yet a useful working plan, turn it into one
+- keep the artifact updated as your working notes and checklist evolve
+
+As you work:
 - do the work
-- update the plan or task state to reflect progress
-- move to the next item
+- update the plan artifact to reflect progress when useful
+- move to the next step you judge is appropriate
 
 If you need to ask the user a question:
 - write it to .dispatch/tasks/{task_id}/mailbox/<NNN>.question
@@ -22,11 +27,11 @@ If you need to ask the user a question:
 
 If no answer arrives within the configured timeout:
 - write your working context to .dispatch/tasks/{task_id}/context.md
-- mark the relevant step as blocked
+- note the blockage clearly in the plan artifact
 - stop
 
 If you hit an unresolvable error:
-- mark the relevant step as failed
+- note the failure clearly in the plan artifact
 - record the error clearly
 - stop
 

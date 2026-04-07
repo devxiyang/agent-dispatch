@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use dispatch_backends::{ResumeSpec, StartSpec, backend_for};
 use dispatch_core::{
     BackendConfig, BackendKind, DispatchConfig, DispatchStore, EventKind, ExecutionMode,
-    ModelConfig, PlanStep, StepStatus, TaskDraft, TaskMode, TaskRecord, TaskSource, TaskStatus,
+    ModelConfig, TaskDraft, TaskMode, TaskRecord, TaskSource, TaskStatus,
 };
 use uuid::Uuid;
 
@@ -41,7 +41,6 @@ pub enum DispatchInput {
         _path: PathBuf,
         prompt: String,
         plan_body: String,
-        steps: Vec<PlanStep>,
     },
 }
 
@@ -82,6 +81,7 @@ pub enum RouteKind {
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 pub struct RouteSummary {
+    pub advisory: bool,
     pub kind: RouteKind,
     pub suggested_mode: Option<String>,
     pub suggested_cli_args: Option<Vec<String>>,
@@ -122,36 +122,39 @@ pub fn route_request(prompt: &str) -> RouteSummary {
     let trimmed = prompt.trim();
     if trimmed.is_empty() {
         return RouteSummary {
+            advisory: true,
             kind: RouteKind::Warmup,
             suggested_mode: None,
             suggested_cli_args: Some(vec!["ready".into()]),
-            reason: "empty request; load config and report readiness".into(),
+            reason: "empty request; the host can treat this as a readiness check".into(),
         };
     }
 
     if let Some(args) = parse_config_request(trimmed) {
         return RouteSummary {
+            advisory: true,
             kind: RouteKind::ConfigRequest,
             suggested_mode: None,
             suggested_cli_args: Some(args),
-            reason: "request matched an explicit config operation".into(),
+            reason: "request looks like a config operation; the host may run the suggested config command directly".into(),
         };
     }
 
     let suggested_mode = suggest_mode_for_prompt(trimmed);
     RouteSummary {
+        advisory: true,
         kind: RouteKind::TaskRequest,
         suggested_mode: Some(task_mode_name(&suggested_mode).into()),
         suggested_cli_args: None,
         reason: match suggested_mode {
             TaskMode::Discuss => {
-                "request appears exploratory or asks for clarification before execution".into()
+                "request appears exploratory, so the host may prefer a discussion-oriented dispatch".into()
             }
             TaskMode::Direct => {
-                "request appears concrete and small enough for direct execution".into()
+                "request appears concrete, so the host may prefer direct execution".into()
             }
             TaskMode::Plan => {
-                "request appears substantial enough to benefit from a persisted plan".into()
+                "request appears substantial enough that the host may prefer a persisted plan artifact".into()
             }
         },
     }
@@ -348,21 +351,14 @@ pub fn create_task_from_request(
     task_mode: TaskMode,
     resolved: &ResolvedTarget,
 ) -> Result<TaskRecord> {
-    let (prompt, task_source, preserve_plan_file, plan_body, plan) = match input {
-        DispatchInput::InlinePrompt { prompt } => {
-            let plan = derive_plan(task_mode.clone(), &prompt);
-            (prompt, TaskSource::InlinePrompt, false, None, plan)
-        }
-        DispatchInput::PromptFile { _path: _, prompt } => {
-            let plan = derive_plan(task_mode.clone(), &prompt);
-            (prompt, TaskSource::PromptFile, false, None, plan)
-        }
+    let (prompt, task_source, plan_body) = match input {
+        DispatchInput::InlinePrompt { prompt } => (prompt, TaskSource::InlinePrompt, None),
+        DispatchInput::PromptFile { _path: _, prompt } => (prompt, TaskSource::PromptFile, None),
         DispatchInput::PlanFile {
             _path: _,
             prompt,
             plan_body,
-            steps,
-        } => (prompt, TaskSource::PlanFile, true, Some(plan_body), steps),
+        } => (prompt, TaskSource::PlanFile, Some(plan_body)),
     };
     Ok(store.create_task(TaskDraft {
         title,
@@ -372,10 +368,8 @@ pub fn create_task_from_request(
         backend: resolved.backend.clone(),
         model: resolved.model.clone(),
         execution_mode,
-        preserve_plan_file,
         plan_body,
         workspace_root: workspace,
-        plan,
     })?)
 }
 
@@ -475,10 +469,6 @@ pub fn dispatch_start(
         })?;
         store.update_task(task.id, |record| {
             record.status = TaskStatus::AwaitingUser;
-            if let Some(step) = record.plan.get_mut(0) {
-                step.status = StepStatus::Blocked;
-                step.notes.push("waiting for user clarification".into());
-            }
         })?;
         store.append_event(
             task.id,
@@ -499,9 +489,6 @@ pub fn dispatch_start(
         record.session = session_hint.clone();
         record.checkpoint.last_invocation = Some(plan.invocation.clone());
         record.checkpoint.session_capture = plan.session_capture.clone();
-        if let Some(step) = record.plan.get_mut(1) {
-            step.status = StepStatus::Running;
-        }
     })?;
     store.append_event(
         task.id,
@@ -545,9 +532,6 @@ pub fn dispatch_resume(
         record.session = Some(plan.session.clone());
         record.checkpoint.restart_count += 1;
         record.checkpoint.last_invocation = Some(plan.invocation.clone());
-        if let Some(step) = record.plan.get_mut(2) {
-            step.status = StepStatus::Running;
-        }
     })?;
     store.append_event(
         task_id,
@@ -626,60 +610,6 @@ fn backend_name_for_kind(kind: &BackendKind) -> &'static str {
     }
 }
 
-fn derive_plan(task_mode: TaskMode, prompt: &str) -> Vec<PlanStep> {
-    let compact = prompt.trim();
-    match task_mode {
-        TaskMode::Direct => vec![
-            PlanStep {
-                id: "execute".into(),
-                title: format!(
-                    "Execute the requested work directly: {}",
-                    truncate(compact, 72)
-                ),
-                status: StepStatus::Pending,
-                notes: vec![],
-            },
-            PlanStep {
-                id: "summarize".into(),
-                title: "Write any requested result or summary to the task output artifact".into(),
-                status: StepStatus::Pending,
-                notes: vec![],
-            },
-        ],
-        TaskMode::Plan | TaskMode::Discuss => vec![
-            PlanStep {
-                id: "clarify".into(),
-                title: format!("Clarify the request details for: {}", truncate(compact, 72)),
-                status: StepStatus::Pending,
-                notes: vec![],
-            },
-            PlanStep {
-                id: "plan".into(),
-                title: format!(
-                    "Propose the execution approach for: {}",
-                    truncate(compact, 72)
-                ),
-                status: StepStatus::Pending,
-                notes: vec![],
-            },
-            PlanStep {
-                id: "next".into(),
-                title: "Capture next actions in the task output artifact".into(),
-                status: StepStatus::Pending,
-                notes: vec![],
-            },
-        ],
-    }
-}
-
-fn truncate(input: &str, max_len: usize) -> String {
-    if input.len() <= max_len {
-        input.to_string()
-    } else {
-        format!("{}...", &input[..max_len.saturating_sub(3)])
-    }
-}
-
 pub fn load_dispatch_input(
     path: PathBuf,
     requested_mode: RequestedTaskMode,
@@ -691,14 +621,12 @@ pub fn load_dispatch_input(
             && body.lines().any(is_checklist_line));
 
     if inferred_plan {
-        let steps = parse_plan_steps(&body)?;
         let prompt = extract_goal_from_plan(&body)
             .unwrap_or_else(|| format!("Execute plan from {}", path.display()));
         return Ok(DispatchInput::PlanFile {
             _path: path,
             prompt,
             plan_body: body,
-            steps,
         });
     }
 
@@ -740,7 +668,7 @@ fn resolve_task_mode(requested_mode: RequestedTaskMode, input: &DispatchInput) -
         RequestedTaskMode::Auto => match input {
             DispatchInput::PlanFile { .. } => TaskMode::Plan,
             DispatchInput::PromptFile { .. } => TaskMode::Direct,
-            DispatchInput::InlinePrompt { prompt } => suggest_mode_for_prompt(prompt),
+            DispatchInput::InlinePrompt { .. } => TaskMode::Direct,
         },
     }
 }
@@ -846,38 +774,6 @@ fn task_mode_name(mode: &TaskMode) -> &'static str {
     }
 }
 
-fn parse_plan_steps(body: &str) -> Result<Vec<PlanStep>> {
-    let mut steps = Vec::new();
-    for (index, line) in body.lines().enumerate() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-            steps.push(plan_step_from_line(index, rest, StepStatus::Pending));
-        } else if let Some(rest) = trimmed.strip_prefix("- [>] ") {
-            steps.push(plan_step_from_line(index, rest, StepStatus::Running));
-        } else if let Some(rest) = trimmed.strip_prefix("- [x] ") {
-            steps.push(plan_step_from_line(index, rest, StepStatus::Done));
-        } else if let Some(rest) = trimmed.strip_prefix("- [?] ") {
-            steps.push(plan_step_from_line(index, rest, StepStatus::Blocked));
-        } else if let Some(rest) = trimmed.strip_prefix("- [!] ") {
-            steps.push(plan_step_from_line(index, rest, StepStatus::Failed));
-        }
-    }
-
-    if steps.is_empty() {
-        bail!("plan file contains no checklist items");
-    }
-    Ok(steps)
-}
-
-fn plan_step_from_line(index: usize, text: &str, status: StepStatus) -> PlanStep {
-    PlanStep {
-        id: format!("step-{:03}", index + 1),
-        title: text.trim().to_string(),
-        status,
-        notes: vec![],
-    }
-}
-
 fn extract_goal_from_plan(body: &str) -> Option<String> {
     body.lines()
         .map(str::trim)
@@ -915,7 +811,6 @@ mod tests {
             _path: "plan.md".into(),
             prompt: "execute plan".into(),
             plan_body: "- [ ] step".into(),
-            steps: vec![],
         };
 
         assert!(matches!(
@@ -929,13 +824,13 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_uses_discuss_for_exploratory_inline_prompts() {
+    fn auto_mode_defaults_inline_prompts_to_direct_for_host_control() {
         let input = DispatchInput::InlinePrompt {
             prompt: "Help me decide whether this should be a direct task or a larger plan".into(),
         };
         assert!(matches!(
             resolve_task_mode(RequestedTaskMode::Auto, &input),
-            TaskMode::Discuss
+            TaskMode::Direct
         ));
     }
 
@@ -951,7 +846,7 @@ mod tests {
 
         let input = load_dispatch_input(path, RequestedTaskMode::Auto).unwrap();
         match input {
-            DispatchInput::PlanFile { steps, .. } => assert_eq!(steps.len(), 2),
+            DispatchInput::PlanFile { .. } => {}
             other => panic!("expected plan input, got {other:?}"),
         }
     }
@@ -1004,9 +899,11 @@ mod tests {
     #[test]
     fn route_request_classifies_warmup_config_and_task_requests() {
         let warmup = route_request("");
+        assert!(warmup.advisory);
         assert_eq!(warmup.kind, RouteKind::Warmup);
 
         let config = route_request("set default to sonnet");
+        assert!(config.advisory);
         assert_eq!(config.kind, RouteKind::ConfigRequest);
         assert_eq!(
             config.suggested_cli_args,
@@ -1014,6 +911,7 @@ mod tests {
         );
 
         let task = route_request("fix the README typo");
+        assert!(task.advisory);
         assert_eq!(task.kind, RouteKind::TaskRequest);
         assert_eq!(task.suggested_mode.as_deref(), Some("direct"));
     }

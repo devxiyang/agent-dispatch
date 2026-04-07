@@ -48,26 +48,17 @@ impl DispatchStore {
             backend: draft.backend,
             model: draft.model,
             execution_mode: draft.execution_mode,
-            preserve_plan_file: draft.preserve_plan_file,
             workspace_root: draft.workspace_root,
             created_at: now,
             updated_at: now,
             status: TaskStatus::Pending,
-            plan: draft.plan,
             session: None,
             checkpoint: Default::default(),
             artifacts,
         };
 
         self.save_task(&task)?;
-        if let Some(plan_body) = draft.plan_body {
-            fs::write(&task.artifacts.plan_file, plan_body).map_err(|source| {
-                DispatchError::Io {
-                    path: task.artifacts.plan_file.clone(),
-                    source,
-                }
-            })?;
-        }
+        self.write_initial_plan_artifact(&task, draft.plan_body.as_deref())?;
         self.append_event(id, EventKind::Created, "task created")?;
         Ok(task)
     }
@@ -83,7 +74,6 @@ impl DispatchStore {
 
     pub fn save_task(&self, task: &TaskRecord) -> Result<()> {
         self.write_json(&task.artifacts.task_file, task)?;
-        self.write_plan(task)?;
         Ok(())
     }
 
@@ -187,12 +177,23 @@ impl DispatchStore {
         Ok(ids)
     }
 
-    fn write_plan(&self, task: &TaskRecord) -> Result<()> {
+    fn write_initial_plan_artifact(&self, task: &TaskRecord, plan_body: Option<&str>) -> Result<()> {
+        let body = plan_body
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.default_plan_artifact(task));
+        fs::write(&task.artifacts.plan_file, body).map_err(|source| DispatchError::Io {
+            path: task.artifacts.plan_file.clone(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    fn default_plan_artifact(&self, task: &TaskRecord) -> String {
         let mut body = String::new();
-        if task.preserve_plan_file && task.artifacts.plan_file.exists() {
-            return Ok(());
-        }
         body.push_str(&format!("# {}\n\n", task.title));
+        body.push_str("## Task\n\n");
+        body.push_str(&task.prompt);
+        body.push_str("\n\n## Runtime Context\n\n");
         body.push_str(&format!("- id: `{}`\n", task.id));
         body.push_str(&format!("- status: `{:?}`\n", task.status));
         body.push_str(&format!("- mode: `{:?}`\n", task.task_mode));
@@ -203,38 +204,19 @@ impl DispatchStore {
         }
         body.push_str(&format!("- execution-mode: `{:?}`\n", task.execution_mode));
         body.push_str(&format!(
-            "- workspace: `{}`\n\n",
+            "- workspace: `{}`\n",
             task.workspace_root.display()
         ));
-        body.push_str("## Prompt\n\n");
-        body.push_str(&task.prompt);
-        body.push_str("\n\n## Plan\n\n");
-
-        for step in &task.plan {
-            body.push_str(&format!(
-                "{} {} (`{}`)\n",
-                step.status.markdown_checkbox(),
-                step.title,
-                step.id
-            ));
-            for note in &step.notes {
-                body.push_str(&format!("  - {note}\n"));
-            }
-        }
-
-        if !task.artifacts.output_file.as_path().exists() {
-            body.push_str("\n## Output\n\n");
-            body.push_str(&format!(
-                "Write any requested summary or report to `{}`.\n",
-                task.artifacts.output_file.display()
-            ));
-        }
-
-        fs::write(&task.artifacts.plan_file, body).map_err(|source| DispatchError::Io {
-            path: task.artifacts.plan_file.clone(),
-            source,
-        })?;
-        Ok(())
+        body.push_str("\n## Working Plan\n\n");
+        body.push_str("- Convert this artifact into a working checklist if the task benefits from one.\n");
+        body.push_str("- Update this file as you make progress.\n");
+        body.push_str("- Ask the user questions through the mailbox when blocked.\n");
+        body.push_str("\n## Output\n\n");
+        body.push_str(&format!(
+            "Write any requested summary or report to `{}`.\n",
+            task.artifacts.output_file.display()
+        ));
+        body
     }
 
     fn write_json<T: serde::Serialize>(&self, path: &Path, value: &T) -> Result<()> {
@@ -281,9 +263,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::DispatchStore;
-    use crate::model::{
-        BackendKind, ExecutionMode, PlanStep, StepStatus, TaskDraft, TaskMode, TaskSource,
-    };
+    use crate::model::{BackendKind, ExecutionMode, TaskDraft, TaskMode, TaskSource};
 
     #[test]
     fn creates_persistent_task_layout() {
@@ -298,15 +278,8 @@ mod tests {
                 backend: BackendKind::Codex,
                 model: Some("gpt-5.3-codex".into()),
                 execution_mode: ExecutionMode::Auto,
-                preserve_plan_file: false,
                 plan_body: None,
                 workspace_root: PathBuf::from("/tmp/workspace"),
-                plan: vec![PlanStep {
-                    id: "review".into(),
-                    title: "Review the auth module".into(),
-                    status: StepStatus::Pending,
-                    notes: vec!["focus on session persistence".into()],
-                }],
             })
             .unwrap();
 
@@ -314,6 +287,38 @@ mod tests {
         assert!(task.artifacts.plan_file.exists());
         assert!(task.artifacts.mailbox_dir.exists());
         assert_eq!(store.read_events(task.id).unwrap().len(), 1);
+        let plan = fs::read_to_string(task.artifacts.plan_file).unwrap();
+        assert!(plan.contains("## Working Plan"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_updates_do_not_overwrite_worker_owned_plan_artifact() {
+        let root = env::temp_dir().join(format!("dispatch-core-test-{}", uuid::Uuid::new_v4()));
+        let store = DispatchStore::new(&root);
+        let task = store
+            .create_task(TaskDraft {
+                title: "Worker owned plan".into(),
+                prompt: "Use the artifact as a working notebook".into(),
+                task_mode: TaskMode::Plan,
+                task_source: TaskSource::PlanFile,
+                backend: BackendKind::Pi,
+                model: Some("pi-default".into()),
+                execution_mode: ExecutionMode::Auto,
+                plan_body: Some("# User Plan\n\n- [ ] initial step\n".into()),
+                workspace_root: PathBuf::from("/tmp/workspace"),
+            })
+            .unwrap();
+
+        fs::write(&task.artifacts.plan_file, "# Worker Revised Plan\n\n- [x] updated step\n").unwrap();
+        store
+            .set_status(task.id, crate::model::TaskStatus::Running, "worker resumed")
+            .unwrap();
+
+        let plan = fs::read_to_string(&task.artifacts.plan_file).unwrap();
+        assert!(plan.contains("# Worker Revised Plan"));
+        assert!(plan.contains("- [x] updated step"));
 
         fs::remove_dir_all(root).unwrap();
     }

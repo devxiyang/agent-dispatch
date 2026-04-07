@@ -5,7 +5,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use anyhow::{Context, Result, bail};
 use dispatch_core::{
     BackendInvocation, DispatchStore, EventKind, SessionCaptureStrategy, SessionLocator,
-    SessionRef, StepStatus, TaskStatus, list_pending_questions,
+    SessionRef, TaskStatus, list_pending_questions,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -80,7 +80,6 @@ pub fn execute_plan(
         Some(task.artifacts.sessions_dir.as_path()),
     )?;
     let success = output.status.success();
-    let synced_plan = load_plan_statuses(&task.artifacts.plan_file, &task.plan);
     let pending_questions = list_pending_questions(&task.artifacts.mailbox_dir)?;
     let completion_marker = task.artifacts.mailbox_dir.join(".done");
 
@@ -91,25 +90,9 @@ pub fn execute_plan(
         } else {
             Some(render_exit_status(&output.status))
         };
-        if let Some(plan) = &synced_plan {
-            task.plan = plan.clone();
-        } else if let Some(step) = task.plan.get_mut(1) {
-            step.status = if success {
-                StepStatus::Done
-            } else {
-                StepStatus::Failed
-            };
-        }
         task.status = if !pending_questions.is_empty() {
             TaskStatus::AwaitingUser
         } else if success && completion_marker.exists() {
-            TaskStatus::Completed
-        } else if success
-            && task
-                .plan
-                .iter()
-                .all(|step| matches!(step.status, StepStatus::Done))
-        {
             TaskStatus::Completed
         } else if success {
             TaskStatus::Running
@@ -237,58 +220,6 @@ fn render_exit_status(status: &ExitStatus) -> String {
     }
 }
 
-fn load_plan_statuses(
-    plan_path: &Path,
-    fallback: &[dispatch_core::PlanStep],
-) -> Option<Vec<dispatch_core::PlanStep>> {
-    let text = fs::read_to_string(plan_path).ok()?;
-    let mut by_id = std::collections::BTreeMap::new();
-    let mut ordered_statuses = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim().strip_prefix("- ").unwrap_or(line.trim());
-        let (status, rest) = if let Some(rest) = trimmed.strip_prefix("[ ] ") {
-            (StepStatus::Pending, rest)
-        } else if let Some(rest) = trimmed.strip_prefix("[>] ") {
-            (StepStatus::Running, rest)
-        } else if let Some(rest) = trimmed.strip_prefix("[x] ") {
-            (StepStatus::Done, rest)
-        } else if let Some(rest) = trimmed.strip_prefix("[?] ") {
-            (StepStatus::Blocked, rest)
-        } else if let Some(rest) = trimmed.strip_prefix("[!] ") {
-            (StepStatus::Failed, rest)
-        } else {
-            continue;
-        };
-        ordered_statuses.push(status.clone());
-
-        let id = rest
-            .rsplit_once("(`")
-            .and_then(|(_, suffix)| suffix.strip_suffix("`)"))
-            .or_else(|| {
-                rest.rsplit_once('(')
-                    .and_then(|(_, suffix)| suffix.strip_suffix(')'))
-            });
-        if let Some(id) = id {
-            by_id.insert(id.to_string(), status);
-        }
-    }
-
-    if by_id.is_empty() && ordered_statuses.is_empty() {
-        return None;
-    }
-
-    let mut plan = fallback.to_vec();
-    let mut ordered = ordered_statuses.into_iter();
-    for step in &mut plan {
-        if let Some(status) = by_id.get(&step.id) {
-            step.status = status.clone();
-        } else if let Some(status) = ordered.next() {
-            step.status = status;
-        }
-    }
-    Some(plan)
-}
-
 #[cfg(test)]
 mod tests {
     use std::env;
@@ -296,8 +227,8 @@ mod tests {
     use std::path::Path;
 
     use dispatch_core::{
-        BackendInvocation, BackendKind, DispatchStore, ExecutionMode, PlanStep,
-        SessionCaptureStrategy, StepStatus, TaskDraft, TaskMode, TaskSource, TaskStatus,
+        BackendInvocation, BackendKind, DispatchStore, ExecutionMode, SessionCaptureStrategy,
+        TaskDraft, TaskMode, TaskSource, TaskStatus,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -352,29 +283,8 @@ mod tests {
                 backend: BackendKind::Codex,
                 model: None,
                 execution_mode: ExecutionMode::Auto,
-                preserve_plan_file: false,
                 plan_body: None,
                 workspace_root: Path::new("/tmp").to_path_buf(),
-                plan: vec![
-                    PlanStep {
-                        id: "plan".into(),
-                        title: "Prepare".into(),
-                        status: StepStatus::Done,
-                        notes: vec![],
-                    },
-                    PlanStep {
-                        id: "run".into(),
-                        title: "Execute".into(),
-                        status: StepStatus::Running,
-                        notes: vec![],
-                    },
-                    PlanStep {
-                        id: "recover".into(),
-                        title: "Recover".into(),
-                        status: StepStatus::Pending,
-                        notes: vec![],
-                    },
-                ],
             })
             .unwrap();
 

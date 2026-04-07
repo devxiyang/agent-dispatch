@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use assert_cmd::Command;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 fn setup_env() -> (TempDir, PathBuf, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
@@ -60,6 +61,15 @@ fn dispatch_cmd(home: &Path) -> Command {
     cmd
 }
 
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
 #[test]
 fn template_can_be_written_to_file() {
     let (temp, home, _root) = setup_env();
@@ -101,6 +111,23 @@ fn ready_reports_config_and_installed_backends() {
 }
 
 #[test]
+fn ready_supports_json_envelope() {
+    let (_temp, home, root) = setup_env();
+
+    let output = dispatch_cmd(&home)
+        .args(["--root", root.to_str().unwrap(), "--json", "ready"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["data"]["default_target"], "fake-pi");
+}
+
+#[test]
 fn route_classifies_warmup_config_and_task_requests() {
     let (_temp, home, root) = setup_env();
 
@@ -114,6 +141,7 @@ fn route_classifies_warmup_config_and_task_requests() {
     )
     .unwrap();
     assert_eq!(warmup["kind"], "Warmup");
+    assert_eq!(warmup["advisory"], true);
 
     let config: serde_json::Value = serde_json::from_slice(
         &dispatch_cmd(&home)
@@ -131,6 +159,7 @@ fn route_classifies_warmup_config_and_task_requests() {
     )
     .unwrap();
     assert_eq!(config["kind"], "ConfigRequest");
+    assert_eq!(config["advisory"], true);
     assert_eq!(config["suggested_cli_args"][1], "set-default");
 
     let task: serde_json::Value = serde_json::from_slice(
@@ -149,6 +178,7 @@ fn route_classifies_warmup_config_and_task_requests() {
     )
     .unwrap();
     assert_eq!(task["kind"], "TaskRequest");
+    assert_eq!(task["advisory"], true);
     assert_eq!(task["suggested_mode"], "direct");
 }
 
@@ -240,7 +270,6 @@ fn plan_file_mode_preserves_user_plan_and_completes() {
 
     assert_eq!(task["task_mode"], "Plan");
     assert_eq!(task["task_source"], "PlanFile");
-    assert_eq!(task["preserve_plan_file"], true);
     assert!(plan.contains("- [x] Reply with exactly PLAN-E2E and nothing else."));
 }
 
@@ -400,6 +429,19 @@ fn config_commands_persist_explicit_backend_model_and_alias_mappings() {
     assert_eq!(config["models"]["review-model"]["model"], "pi-reviewer");
     assert_eq!(config["aliases"]["reviewer"]["model"], "review-model");
     assert_eq!(config["aliases"]["reviewer"]["prompt"], "focus on risks");
+
+    let config_json_output = dispatch_cmd(&home)
+        .args(["--root", root.to_str().unwrap(), "--json", "config", "show"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let config_json: serde_json::Value = serde_json::from_slice(&config_json_output).unwrap();
+
+    assert_eq!(config_json["ok"], true);
+    assert_eq!(config_json["data"]["default"], "reviewer");
+    assert_eq!(config_json["data"]["models"]["review-model"]["backend"], "custom-pi");
 }
 
 #[test]
@@ -493,4 +535,199 @@ fn mailbox_question_answer_and_resume_roundtrip_completes() {
     assert_eq!(final_status["status"], "Completed");
     assert!(output_body.contains("answer: Finish the task"));
     assert!(task_dir.join("mailbox/.done").exists());
+}
+
+#[test]
+fn list_and_inspect_expose_host_friendly_task_views() {
+    let (_temp, home, root) = setup_env();
+
+    let output = dispatch_cmd(&home)
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "run",
+            "--prompt",
+            "Reply with exactly LIST-INSPECT-E2E and nothing else.",
+            "--model",
+            "fake-pi",
+            "--workspace",
+            ".",
+            "--foreground",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let task_id = value["task_id"].as_str().unwrap();
+
+    let list_output = dispatch_cmd(&home)
+        .args(["--root", root.to_str().unwrap(), "--json", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_payload: serde_json::Value = serde_json::from_slice(&list_output).unwrap();
+    assert_eq!(list_payload["ok"], true);
+    assert_eq!(list_payload["data"][0]["task_id"], task_id);
+    assert_eq!(list_payload["data"][0]["status"], "Completed");
+
+    let inspect_output = dispatch_cmd(&home)
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--json",
+            "inspect",
+            task_id,
+            "--event-limit",
+            "3",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let inspect_payload: serde_json::Value = serde_json::from_slice(&inspect_output).unwrap();
+    assert_eq!(inspect_payload["ok"], true);
+    assert_eq!(inspect_payload["data"]["task"]["id"], task_id);
+    assert!(inspect_payload["data"]["pending_questions"].is_array());
+    assert!(inspect_payload["data"]["recent_events"].as_array().unwrap().len() <= 3);
+}
+
+#[test]
+fn json_questions_uses_structured_host_schema() {
+    let (_temp, home, root) = setup_env();
+
+    let output = dispatch_cmd(&home)
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "run",
+            "--prompt",
+            "NEED-ANSWER-E2E",
+            "--mode",
+            "plan",
+            "--model",
+            "fake-pi",
+            "--workspace",
+            ".",
+            "--foreground",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let run_payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let task_id = run_payload["task_id"].as_str().unwrap();
+
+    let questions_output = dispatch_cmd(&home)
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--json",
+            "questions",
+            task_id,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let questions_payload: serde_json::Value = serde_json::from_slice(&questions_output).unwrap();
+
+    assert_eq!(questions_payload["ok"], true);
+    assert_eq!(questions_payload["data"][0]["task_id"], task_id);
+    assert_eq!(questions_payload["data"][0]["status"], "AwaitingUser");
+    assert_eq!(questions_payload["data"][0]["questions"][0]["sequence"], "001");
+    assert_eq!(
+        questions_payload["data"][0]["questions"][0]["question"],
+        "What should the worker do next?\n"
+    );
+}
+
+#[test]
+fn json_errors_use_structured_envelope_for_hosts() {
+    let (_temp, home, root) = setup_env();
+    let missing_task_id = Uuid::new_v4().to_string();
+
+    let output = dispatch_cmd(&home)
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--json",
+            "status",
+            &missing_task_id,
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(payload["ok"], false);
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist")
+    );
+}
+
+#[test]
+fn backends_json_reports_capabilities_for_hosts() {
+    let (_temp, home, root) = setup_env();
+
+    let output = dispatch_cmd(&home)
+        .args(["--root", root.to_str().unwrap(), "--json", "backends"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(payload["ok"], true);
+    assert!(payload["data"].is_array());
+    assert!(payload["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|backend| backend["kind"] == "pi" && backend["capabilities"].is_object()));
+}
+
+#[test]
+fn repository_assets_do_not_contain_machine_specific_absolute_paths() {
+    let root = repo_root();
+    let files = [
+        root.join("README.md"),
+        root.join("prompts/dispatcher-system.md"),
+        root.join("prompts/worker-template.md"),
+        root.join("docs/dispatch-flows.md"),
+        root.join("docs/dispatch-reference-map.md"),
+        root.join("docs/prompt-cli-architecture.md"),
+        root.join("docs/host-integration-contract.md"),
+        root.join("integrations/README.md"),
+    ];
+    let forbidden = [
+        "/Users/devxiyang/",
+        "/Users/murph/",
+        "/tmp/dispatch",
+    ];
+
+    for file in files {
+        let body = fs::read_to_string(&file).unwrap();
+        for needle in forbidden {
+            assert!(
+                !body.contains(needle),
+                "file {} contains forbidden path fragment {}",
+                file.display(),
+                needle
+            );
+        }
+    }
 }

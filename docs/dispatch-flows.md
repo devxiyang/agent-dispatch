@@ -6,14 +6,14 @@ This file lands the full operational flow from the reference dispatch project in
 
 Primary source:
 
-- `/Users/devxiyang/code/tmp/dispatch/skills/dispatch/SKILL.md`
+- `skills/dispatch/SKILL.md` in the upstream `dispatch` reference repo
 
 Supporting sources:
 
-- `/Users/devxiyang/code/tmp/dispatch/skills/dispatch/references/first-run-setup.md`
-- `/Users/devxiyang/code/tmp/dispatch/skills/dispatch/references/config-modification.md`
-- `/Users/devxiyang/code/tmp/dispatch/skills/dispatch/references/proactive-recovery.md`
-- `/Users/devxiyang/code/tmp/dispatch/skills/dispatch/references/ipc-protocol.md`
+- `skills/dispatch/references/first-run-setup.md` in the upstream reference repo
+- `skills/dispatch/references/config-modification.md` in the upstream reference repo
+- `skills/dispatch/references/proactive-recovery.md` in the upstream reference repo
+- `skills/dispatch/references/ipc-protocol.md` in the upstream reference repo
 
 ## First-Run Setup Flow
 

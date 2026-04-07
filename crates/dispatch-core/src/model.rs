@@ -58,35 +58,6 @@ pub enum TaskStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum StepStatus {
-    Pending,
-    Running,
-    Done,
-    Blocked,
-    Failed,
-}
-
-impl StepStatus {
-    pub fn markdown_checkbox(&self) -> &'static str {
-        match self {
-            Self::Pending => "[ ]",
-            Self::Running => "[>]",
-            Self::Done => "[x]",
-            Self::Blocked => "[?]",
-            Self::Failed => "[!]",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanStep {
-    pub id: String,
-    pub title: String,
-    pub status: StepStatus,
-    pub notes: Vec<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionLocator {
     Id(String),
@@ -177,12 +148,10 @@ pub struct TaskRecord {
     pub backend: BackendKind,
     pub model: Option<String>,
     pub execution_mode: ExecutionMode,
-    pub preserve_plan_file: bool,
     pub workspace_root: PathBuf,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub status: TaskStatus,
-    pub plan: Vec<PlanStep>,
     pub session: Option<SessionRef>,
     pub checkpoint: RuntimeCheckpoint,
     pub artifacts: ArtifactPaths,
@@ -197,10 +166,8 @@ pub struct TaskDraft {
     pub backend: BackendKind,
     pub model: Option<String>,
     pub execution_mode: ExecutionMode,
-    pub preserve_plan_file: bool,
     pub plan_body: Option<String>,
     pub workspace_root: PathBuf,
-    pub plan: Vec<PlanStep>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

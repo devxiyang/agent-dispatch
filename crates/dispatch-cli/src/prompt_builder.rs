@@ -12,7 +12,7 @@ pub fn build_worker_prompt(
     prompt.push_str("\n\nContext:\n");
     prompt.push_str(&format!("- Outcome: {}.\n", user_request.trim()));
     prompt.push_str(&format!(
-        "- References: read {}, then write requested results to {} if needed.\n",
+        "- References: read {}, adapt it into a working plan if needed, then write requested results to {} if needed.\n",
         task.artifacts.plan_file.display(),
         task.artifacts.output_file.display()
     ));
@@ -67,6 +67,7 @@ fn extract_first_text_block(markdown: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::path::PathBuf;
 
     use dispatch_core::{
@@ -80,7 +81,7 @@ mod tests {
     #[test]
     fn worker_prompt_comes_from_prompt_asset_and_uses_mailbox() {
         let task_id = Uuid::new_v4();
-        let task_root = PathBuf::from(format!("/tmp/dispatch-test/{task_id}"));
+        let task_root = env::temp_dir().join(format!("dispatch-test/{task_id}"));
         let task = TaskRecord {
             id: task_id,
             title: "Test".into(),
@@ -90,12 +91,10 @@ mod tests {
             backend: BackendKind::Pi,
             model: Some("pi-default".into()),
             execution_mode: ExecutionMode::Auto,
-            preserve_plan_file: false,
             workspace_root: PathBuf::from("/tmp/workspace"),
             created_at: now(),
             updated_at: now(),
             status: TaskStatus::Pending,
-            plan: vec![],
             session: None,
             checkpoint: RuntimeCheckpoint::default(),
             artifacts: ArtifactPaths::new(task_root),
