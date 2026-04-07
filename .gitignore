@@ -1,2 +1,4 @@
 /target
 /.dispatch
+/crates/dispatch-cli/mailbox
+/crates/dispatch-cli/output.md
