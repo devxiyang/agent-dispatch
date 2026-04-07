@@ -1,6 +1,11 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	parseDispatchErrorEnvelope,
+	parseDispatchSuccessEnvelope,
+	parseJson as parseLooseJson,
+} from "./json-envelope.js";
 
 import type {
 	ExtensionAPI,
@@ -45,11 +50,27 @@ interface DispatchTaskRecord {
 	};
 }
 
+interface DispatchTaskListItem {
+	task_id: string;
+	title: string;
+	status: string;
+	backend: string;
+	model?: string | null;
+	updated_at: string;
+	pending_question_count: number;
+}
+
 interface DispatchEventRecord {
 	sequence: number;
 	timestamp: string;
 	kind: string;
 	message: string;
+}
+
+interface DispatchInspectSummary {
+	task: DispatchTaskRecord;
+	pending_questions: unknown[];
+	recent_events: DispatchEventRecord[];
 }
 
 interface DispatchExecutionSummary {
@@ -74,6 +95,18 @@ interface DispatchRouteSummary {
 	suggested_mode?: string | null;
 	suggested_cli_args?: string[] | null;
 	reason: string;
+}
+
+interface DispatchJsonEnvelope<T> {
+	ok: true;
+	data: T;
+}
+
+interface DispatchJsonErrorEnvelope {
+	ok: false;
+	error?: {
+		message?: string;
+	};
 }
 
 interface DispatchRunOptions {
@@ -211,6 +244,21 @@ async function handleDispatchCommand(
 		return;
 	}
 
+	if (subcommand === "list") {
+		await showTaskList(pi, ctx, stateRoot());
+		return;
+	}
+
+	if (subcommand === "inspect") {
+		const taskId = tokens[1] ?? stateTaskId();
+		if (!taskId) {
+			ctx.ui.notify("No dispatch task selected yet.", "info");
+			return;
+		}
+		await showTaskInspect(pi, ctx, taskId, stateRoot());
+		return;
+	}
+
 	if (subcommand === "events") {
 		const taskId = tokens[1] ?? stateTaskId();
 		if (!taskId) {
@@ -258,7 +306,7 @@ async function handleDispatchCommand(
 	}
 
 	if (subcommand === "backends") {
-		const result = await runDispatchCli(ctx.cwd, ["backends"]);
+		const result = await runDispatchCliJson<unknown[]>(ctx.cwd, ["backends"]);
 		if (!result.ok) {
 			ctx.ui.notify(result.error, "error");
 			return;
@@ -266,7 +314,7 @@ async function handleDispatchCommand(
 		pi.sendMessage(
 			{
 				customType: "dispatch-backends",
-				content: "```text\n" + result.stdout.trim() + "\n```",
+				content: "```json\n" + JSON.stringify(result.data, null, 2) + "\n```",
 				display: true,
 			},
 			{ triggerTurn: false },
@@ -330,20 +378,17 @@ async function runNewTask(
 	if (options.model) {
 		args.push("--model", options.model);
 	}
-	const result = await runDispatchCli(ctx.cwd, args);
+	const result = await runDispatchCliJson<DispatchExecutionSummary | Record<string, unknown>>(
+		ctx.cwd,
+		args,
+	);
 	if (!result.ok) {
 		ctx.ui.notify(result.error, "error");
 		return;
 	}
 
-	const payload = parseJson<DispatchExecutionSummary | Record<string, unknown>>(result.stdout);
-	if (!payload) {
-		ctx.ui.notify("Dispatch returned non-JSON output.", "error");
-		return;
-	}
-
-	if ("task_id" in payload) {
-		await showTaskStatus(pi, ctx, String(payload.task_id), options.root);
+	if ("task_id" in result.data) {
+		await showTaskStatus(pi, ctx, String(result.data.task_id), options.root);
 		return;
 	}
 
@@ -359,15 +404,15 @@ async function generateTemplate(
 	if (options.output) {
 		args.push("--output", options.output);
 	}
-	const result = await runDispatchCli(ctx.cwd, args);
+	const result = await runDispatchCliJson<Record<string, unknown>>(ctx.cwd, args);
 	if (!result.ok) {
 		ctx.ui.notify(result.error, "error");
 		return;
 	}
 
 	const content = options.output
-		? `Template written to \`${result.stdout.trim()}\``
-		: "```md\n" + result.stdout.trim() + "\n```";
+		? `Template written to \`${String((result.data as Record<string, unknown>).output_path ?? "")}\``
+		: "```md\n" + String((result.data as Record<string, unknown>).body ?? "").trim() + "\n```";
 	pi.sendMessage(
 		{
 			customType: "dispatch-template",
@@ -382,17 +427,13 @@ async function showReady(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext | ExtensionContext,
 ) {
-	const result = await runDispatchCli(ctx.cwd, ["ready"]);
+	const result = await runDispatchCliJson<DispatchReadySummary>(ctx.cwd, ["ready"]);
 	if (!result.ok) {
 		ctx.ui.notify(result.error, "error");
 		return;
 	}
 
-	const payload = parseJson<DispatchReadySummary>(result.stdout);
-	if (!payload) {
-		ctx.ui.notify("Failed to parse dispatch readiness JSON.", "error");
-		return;
-	}
+	const payload = result.data;
 
 	pi.sendMessage(
 		{
@@ -416,11 +457,11 @@ async function routeDispatchRequest(
 	cwd: string,
 	prompt: string,
 ): Promise<DispatchRouteSummary | undefined> {
-	const result = await runDispatchCli(cwd, ["route", "--prompt", prompt]);
+	const result = await runDispatchCliJson<DispatchRouteSummary>(cwd, ["route", "--prompt", prompt]);
 	if (!result.ok) {
 		return undefined;
 	}
-	return parseJson<DispatchRouteSummary>(result.stdout);
+	return result.data;
 }
 
 async function runConfigCommand(
@@ -429,7 +470,7 @@ async function runConfigCommand(
 	args: string[],
 ) {
 	if (args.length === 0) {
-		const result = await runDispatchCli(ctx.cwd, ["config", "show"]);
+		const result = await runDispatchCliJson<Record<string, unknown>>(ctx.cwd, ["config", "show"]);
 		if (!result.ok) {
 			ctx.ui.notify(result.error, "error");
 			return;
@@ -437,7 +478,7 @@ async function runConfigCommand(
 		pi.sendMessage(
 			{
 				customType: "dispatch-config",
-				content: "```yaml\n" + result.stdout.trim() + "\n```",
+				content: "```json\n" + JSON.stringify(result.data, null, 2) + "\n```",
 				display: true,
 			},
 			{ triggerTurn: false },
@@ -445,7 +486,7 @@ async function runConfigCommand(
 		return;
 	}
 
-	const result = await runDispatchCli(ctx.cwd, ["config", ...args]);
+	const result = await runDispatchCliJson<Record<string, unknown>>(ctx.cwd, ["config", ...args]);
 	if (!result.ok) {
 		ctx.ui.notify(result.error, "error");
 		return;
@@ -454,7 +495,7 @@ async function runConfigCommand(
 	pi.sendMessage(
 		{
 			customType: "dispatch-config",
-			content: "```text\n" + result.stdout.trim() + "\n```",
+			content: "```json\n" + JSON.stringify(result.data, null, 2) + "\n```",
 			display: true,
 		},
 		{ triggerTurn: false },
@@ -466,7 +507,7 @@ async function resumeTask(
 	ctx: ExtensionCommandContext,
 	options: DispatchResumeOptions,
 ) {
-	const result = await runDispatchCli(ctx.cwd, [
+	const result = await runDispatchCliJson<DispatchExecutionSummary | Record<string, unknown>>(ctx.cwd, [
 		"answer",
 		options.taskId,
 		"--message",
@@ -479,16 +520,10 @@ async function resumeTask(
 		return;
 	}
 
-	const payload = parseJson<DispatchExecutionSummary | Record<string, unknown>>(result.stdout);
-	if (!payload) {
-		ctx.ui.notify("Dispatch returned non-JSON output.", "error");
-		return;
-	}
-
 	pi.sendMessage(
 		{
 			customType: "dispatch-answer",
-			content: "```json\n" + JSON.stringify(payload, null, 2) + "\n```",
+			content: "```json\n" + JSON.stringify(result.data, null, 2) + "\n```",
 			display: true,
 		},
 		{ triggerTurn: false },
@@ -512,19 +547,18 @@ async function resumeExecution(
 		args.push("--execution-mode", options.executionMode);
 	}
 
-	const result = await runDispatchCli(ctx.cwd, args);
+	const result = await runDispatchCliJson<DispatchExecutionSummary | Record<string, unknown>>(ctx.cwd, args);
 	if (!result.ok) {
 		ctx.ui.notify(result.error, "error");
 		return;
 	}
 
-	const payload = parseJson<DispatchExecutionSummary | Record<string, unknown>>(result.stdout);
-	if (!payload || !("task_id" in payload)) {
+	if (!("task_id" in result.data)) {
 		ctx.ui.notify("Dispatch returned an unexpected payload.", "error");
 		return;
 	}
 
-	await showTaskStatus(pi, ctx, String(payload.task_id), options.root);
+	await showTaskStatus(pi, ctx, String(result.data.task_id), options.root);
 }
 
 async function showTaskStatus(
@@ -533,17 +567,13 @@ async function showTaskStatus(
 	taskId: string,
 	root: string,
 ) {
-	const result = await runDispatchCli(ctx.cwd, ["status", taskId, "--root", root]);
+	const result = await runDispatchCliJson<DispatchTaskRecord>(ctx.cwd, ["status", taskId, "--root", root]);
 	if (!result.ok) {
 		ctx.ui.notify(result.error, "error");
 		return;
 	}
 
-	const task = parseJson<DispatchTaskRecord>(result.stdout);
-	if (!task) {
-		ctx.ui.notify("Failed to parse dispatch status JSON.", "error");
-		return;
-	}
+	const task = result.data;
 
 	updateState(pi, {
 		root,
@@ -571,23 +601,95 @@ async function showTaskEvents(
 	taskId: string,
 	root: string,
 ) {
-	const result = await runDispatchCli(ctx.cwd, ["events", taskId, "--root", root]);
+	const result = await runDispatchCliJson<DispatchEventRecord[]>(ctx.cwd, ["events", taskId, "--root", root]);
 	if (!result.ok) {
 		ctx.ui.notify(result.error, "error");
 		return;
 	}
 
-	const events = parseJson<DispatchEventRecord[]>(result.stdout);
-	if (!events) {
-		ctx.ui.notify("Failed to parse dispatch events JSON.", "error");
-		return;
-	}
+	const events = result.data;
 
 	const recent = events.slice(-MAX_EVENT_LINES);
 	pi.sendMessage(
 		{
 			customType: "dispatch-events",
 			content: formatEventsMarkdown(taskId, recent, events.length),
+			display: true,
+		},
+		{ triggerTurn: false },
+	);
+}
+
+async function showTaskList(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext | ExtensionContext,
+	root: string,
+) {
+	const result = await runDispatchCliJson<DispatchTaskListItem[]>(ctx.cwd, ["list", "--root", root]);
+	if (!result.ok) {
+		ctx.ui.notify(result.error, "error");
+		return;
+	}
+
+	const tasks = result.data;
+
+	const content =
+		tasks.length === 0
+			? "No dispatch tasks found."
+			: [
+					"**Dispatch Tasks**",
+					...tasks.slice(0, MAX_EVENT_LINES).map((task) => {
+						const suffix =
+							task.pending_question_count > 0
+								? `, questions=${task.pending_question_count}`
+								: "";
+						return `- \`${task.task_id.slice(0, 8)}\` ${task.status.toLowerCase()} ${task.backend} ${task.title}${suffix}`;
+					}),
+				].join("\n");
+
+	pi.sendMessage(
+		{
+			customType: "dispatch-list",
+			content,
+			display: true,
+		},
+		{ triggerTurn: false },
+	);
+}
+
+async function showTaskInspect(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext | ExtensionContext,
+	taskId: string,
+	root: string,
+) {
+	const result = await runDispatchCliJson<DispatchInspectSummary>(ctx.cwd, ["inspect", taskId, "--root", root]);
+	if (!result.ok) {
+		ctx.ui.notify(result.error, "error");
+		return;
+	}
+
+	const payload = result.data;
+
+	updateState(pi, {
+		root,
+		lastTaskId: payload.task.id,
+		lastTaskTitle: payload.task.title,
+		lastTaskStatus: payload.task.status,
+		lastTaskBackend: payload.task.backend,
+		lastUpdatedAt: payload.task.updated_at,
+	});
+	renderUi(ctx, payload.task);
+
+	pi.sendMessage(
+		{
+			customType: "dispatch-inspect",
+			content: [
+				formatTaskMarkdown(payload.task),
+				"",
+				`Pending questions: \`${payload.pending_questions.length}\``,
+				`Recent events: \`${payload.recent_events.length}\``,
+			].join("\n"),
 			display: true,
 		},
 		{ triggerTurn: false },
@@ -606,17 +708,13 @@ async function showTaskQuestions(
 	}
 	args.push("--root", root);
 
-	const result = await runDispatchCli(ctx.cwd, args);
+	const result = await runDispatchCliJson<unknown[]>(ctx.cwd, args);
 	if (!result.ok) {
 		ctx.ui.notify(result.error, "error");
 		return;
 	}
 
-	const payload = parseJson<unknown[]>(result.stdout);
-	if (!payload) {
-		ctx.ui.notify("Failed to parse dispatch questions JSON.", "error");
-		return;
-	}
+	const payload = result.data;
 
 	pi.sendMessage(
 		{
@@ -634,7 +732,7 @@ async function refreshUiFromState(pi: ExtensionAPI, ctx: ExtensionContext) {
 		return;
 	}
 
-	const result = await runDispatchCli(ctx.cwd, [
+	const result = await runDispatchCliJson<DispatchTaskRecord>(ctx.cwd, [
 		"status",
 		state.lastTaskId,
 		"--root",
@@ -646,11 +744,7 @@ async function refreshUiFromState(pi: ExtensionAPI, ctx: ExtensionContext) {
 		return;
 	}
 
-	const task = parseJson<DispatchTaskRecord>(result.stdout);
-	if (!task) {
-		renderFallbackState(ctx);
-		return;
-	}
+	const task = result.data;
 
 	updateState(pi, {
 		root: state.root,
@@ -817,19 +911,34 @@ function parseTemplateOptions(
 	};
 }
 
-async function runDispatchCli(
+async function runDispatchCliJson<T>(
 	cwd: string,
 	commandArgs: string[],
-): Promise<{ ok: true; stdout: string; stderr: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
 	const invocation = resolveDispatchInvocation();
-	const result = await executeCommand(invocation, [...invocation.argsPrefix, ...commandArgs], cwd);
+	const result = await executeCommand(
+		invocation,
+		[...invocation.argsPrefix, "--json", ...commandArgs],
+		cwd,
+	);
 	if (result.code !== 0) {
+		const parsedError =
+			parseDispatchErrorEnvelope(result.stdout) ??
+			parseDispatchErrorEnvelope(result.stderr);
 		return {
 			ok: false,
-			error: (result.stderr || result.stdout || "dispatch command failed").trim(),
+			error:
+				parsedError?.error?.message?.trim() ||
+				(result.stderr || result.stdout || "dispatch command failed").trim(),
 		};
 	}
-	return { ok: true, stdout: result.stdout, stderr: result.stderr };
+	const envelope = parseDispatchSuccessEnvelope(result.stdout) as
+		| DispatchJsonEnvelope<T>
+		| undefined;
+	if (!envelope) {
+		return { ok: false, error: "dispatch command returned invalid JSON envelope" };
+	}
+	return { ok: true, data: envelope.data };
 }
 
 async function executeCommand(
@@ -1029,11 +1138,7 @@ function splitShellArgs(input: string): string[] {
 }
 
 function parseJson<T>(raw: string): T | undefined {
-	try {
-		return JSON.parse(raw) as T;
-	} catch {
-		return undefined;
-	}
+	return parseLooseJson(raw) as T | undefined;
 }
 
 function statusColorName(status: string): "success" | "warning" | "error" | "dim" {

@@ -2,6 +2,9 @@
   "name": "pi-dispatch-host",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test ./json-envelope.test.mjs"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
