@@ -1,0 +1,10 @@
+{
+  "name": "pi-dispatch-host",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
