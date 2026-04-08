@@ -116,6 +116,14 @@ Its responsibilities are:
 
 The dispatcher prompt should treat CLI output as operational state, not as the final user-facing response.
 
+In practice, the dispatcher prompt should behave like a host-side operator:
+
+- route warmup, config, task, inspection, and resume requests
+- choose backend, model, and task mode deliberately
+- prefer inspecting durable state over trusting conversational memory
+- surface mailbox questions to the user instead of inventing answers
+- recover from failures using observed runtime state
+
 ### 2. Worker prompt
 
 The worker prompt runs in the backend worker session.
@@ -131,6 +139,14 @@ Its responsibilities are:
 
 The worker prompt should be allowed to adapt the plan as needed. The runtime must not assume the original plan is final.
 
+In practice, the worker prompt should preserve execution discipline:
+
+- turn a weak task brief into a usable working plan when needed
+- keep progress markers honest when checklist form is used
+- use mailbox files only for worker-initiated clarification
+- leave behind readable context when blocked or failing
+- keep plan state, output artifacts, and completion markers consistent
+
 ## CLI Contract
 
 The CLI is the executable surface area that the host prompt can rely on.
@@ -138,7 +154,6 @@ The CLI is the executable surface area that the host prompt can rely on.
 It should expose a narrow, stable command set:
 
 - `dispatch ready`
-- `dispatch route`
 - `dispatch run`
 - `dispatch list`
 - `dispatch inspect`
@@ -152,7 +167,7 @@ It should expose a narrow, stable command set:
 
 Optional convenience commands can exist, but these are the core runtime actions.
 
-`dispatch route` should be treated as advisory. The host prompt remains responsible for the final decision about which command to run next.
+Backend-native forking may exist internally, but it is not part of the primary public CLI contract today.
 
 ### CLI responsibilities
 
@@ -166,6 +181,15 @@ Optional convenience commands can exist, but these are the core runtime actions.
 - write answers atomically
 - resume existing work from persisted state
 
+For backends that support native session continuation, the runtime should preserve the exact session reference needed for later resume.
+
+For bootstrap and first-run setup, the current default target preference is:
+
+- `pi` first
+- then `codex`
+- then `claude`
+- then other discovered targets
+
 ### CLI output
 
 Every operational command should support machine-readable output via `--json`.
@@ -177,7 +201,7 @@ Recommended host pattern:
 - use `--json` for operational calls
 - prefer `inspect` for single-task inspection
 - prefer `list` for multi-task overview
-- treat `route` as advisory only
+- interpret intent in the host prompt, then call the matching command directly
 
 ## Artifact Contract
 
@@ -191,7 +215,6 @@ Each task should live under:
   output.md
   context.md
   mailbox/
-  sessions/
   outputs/
 ```
 
@@ -234,11 +257,16 @@ Rules:
 - answers are written atomically
 - unanswered questions must survive restarts
 - `.done` marks task completion
+- ordinary progress updates belong in `plan.md`, not in mailbox files
 
 ### Session and output artifacts
 
-- `sessions/` stores backend-native session references when available
+- runtime session storage stores backend-native session files outside the task artifact tree when a backend uses file-backed session paths
 - `outputs/` stores stdout and stderr for each execution attempt
+
+For file-backed session backends such as `pi`, session storage remains runtime-owned so those files do not leak into the workspace `.dispatch/` tree while still giving the runtime a stable session reference to resume.
+
+This is why `resume` is task-centric instead of session-centric: the host resumes a task id, and the runtime reuses the correct backend session handle underneath.
 
 These artifacts exist to support recovery, debugging, and auditability.
 
@@ -254,6 +282,7 @@ This boundary is the most important architectural rule in the project.
 - refining plans
 - asking clarifying questions
 - deciding how to continue after interruption
+- keeping the plan artifact readable and useful to future turns
 
 ### Owned by the runtime
 
@@ -288,6 +317,12 @@ When adding new features, prefer these questions:
 3. Should this be a durable artifact or event?
 
 Avoid putting model judgment into the runtime unless the logic is required for safety, persistence, or interoperability.
+
+When deciding where a new rule belongs:
+
+- if it changes how the host reasons about what to do next, prefer the dispatcher prompt
+- if it changes how a worker records or advances work, prefer the worker prompt
+- if it changes persistence, resume fidelity, or machine-readable state, prefer the CLI/runtime
 
 ## v1 Direction
 

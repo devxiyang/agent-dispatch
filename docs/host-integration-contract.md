@@ -31,6 +31,9 @@ Hosts are expected to:
 - manage worker execution and resume
 - expose machine-readable operational state
 
+Task artifacts live under the configured task root.
+When a backend uses file-backed session paths, that storage is runtime-owned and lives outside the task root.
+
 ## Required Host Capabilities
 
 A host integration should be able to:
@@ -109,22 +112,6 @@ Purpose:
 - inspect installed backends
 - warm up dispatch usage in a session
 
-### Advisory classification
-
-Use:
-
-- `dispatch --json route --prompt "..."`
-
-Purpose:
-
-- get an advisory classification such as warmup, config, or task
-- get a suggested next action
-
-Important:
-
-- this is advisory only
-- the host makes the final decision
-
 ### Task creation
 
 Use:
@@ -162,6 +149,24 @@ Purpose:
 
 - answer worker questions
 - continue execution after a pause or failure
+
+`resume` means "continue the existing durable task using its stored session reference when available".
+
+Hosts should think in task ids, not in raw backend session handles.
+
+For example:
+
+- `pi` tasks may carry an exact file-backed session path
+- `claude` tasks may carry a native session id
+- `codex` tasks may carry a captured native session id
+
+The host should not manipulate those handles directly.
+
+### Forking
+
+Some backends support native session forking, but `fork` is not currently part of the stable host-facing CLI surface.
+
+Hosts should treat forking as an internal runtime capability unless and until a dedicated CLI command is added.
 
 ## Host Responsibilities
 
@@ -202,6 +207,12 @@ For a blocked task:
 3. collect the user answer
 4. call `dispatch --json answer ...`
 5. call `dispatch --json resume ...`
+
+For a retry or continuation:
+
+1. call `dispatch --json inspect <task-id>`
+2. confirm that the task should continue rather than be replaced by a new task
+3. call `dispatch --json resume <task-id> --message "..."`
 
 ## Generic Host Example
 

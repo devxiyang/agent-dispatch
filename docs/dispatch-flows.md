@@ -2,6 +2,8 @@
 
 This file lands the full operational flow from the reference dispatch project into `agent-dispatch`.
 
+These flows are now interpreted through the local prompt + CLI runtime, not through a host-specific skill implementation.
+
 ## Source Reference
 
 Primary source:
@@ -74,6 +76,8 @@ Rule:
 9. report task id and summary
 10. return control immediately
 
+In the current runtime, the dispatcher prompt decides which command to run and the CLI performs the durable side effects.
+
 ## Mailbox Flow
 
 Mailbox traffic is worker-initiated only.
@@ -136,6 +140,8 @@ When the user asks for status:
 3. read recent events
 4. check whether there is a pending mailbox question
 5. summarize only what matters
+
+The host should prefer `inspect` as the default progress read because it combines task snapshot, recent events, and pending questions.
 
 ## Parallel and Sequential Work
 

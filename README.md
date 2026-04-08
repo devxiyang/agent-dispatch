@@ -54,11 +54,16 @@ Each task gets a dedicated directory:
       context.md
       events.jsonl
       mailbox/
-      sessions/
       outputs/
 ```
 
 `task.json` is the canonical state. `events.jsonl` is append-only. `plan.md` is a worker-owned working artifact, not the runtime source of truth.
+
+Native session storage for backends that use explicit session files is runtime-owned and lives outside the task artifact tree:
+
+```text
+~/.dispatch/runtime/sessions/<task-id>/
+```
 
 `mailbox/` is the worker-to-user handoff channel:
 
@@ -80,14 +85,23 @@ outputs/
   attempt-001.stderr.log
 ```
 
+In practice, task behavior is split three ways:
+
+- the dispatcher prompt decides when to run, inspect, answer, or resume
+- the worker prompt decides how to execute and keep `plan.md` meaningful
+- the CLI persists state and remembers the exact backend session reference
+
 ## Backend Notes
+
+- Bootstrap default preference currently favors:
+  `pi` first, then `codex`, then `claude`, then other discovered targets.
 
 - `codex`
   Uses native session resume. `auto` maps to `--full-auto`; `danger` maps to `--dangerously-bypass-approvals-and-sandbox`.
 - `claude`
   Uses a preallocated `--session-id` so the dispatcher can persist the session reference before execution. `auto` maps to `--permission-mode auto`; `danger` maps to `--dangerously-skip-permissions`.
 - `pi`
-  Uses a file-backed session in the task's `sessions/` directory via `--session <path>`. The current adapter records execution mode but does not add extra flags because the CLI help does not expose a separate approval-bypass switch.
+  Uses a file-backed session in the runtime session store under `~/.dispatch/runtime/sessions/<task-id>/` via `--session <path>` so the dispatcher can remember the exact corresponding session. The current adapter records execution mode but does not add extra flags because the CLI help does not expose a separate approval-bypass switch.
 - `cursor-agent`
   Included as a first-class backend target, but native resume is still marked unvalidated until the local CLI can be checked. `auto` and `danger` currently both map to `--force`. External task checkpoints still work.
 
@@ -101,8 +115,6 @@ Most operational commands support `--json` so a host prompt can treat `dispatch`
   Generate a `plan.md` template that the user can fill in directly.
 - `dispatch ready`
   Load config and report dispatcher readiness without starting a task.
-- `dispatch route --prompt "..."`
-  Advisory classifier for warm-up, config request, or task request. Hosts may use it as a suggestion helper instead of treating it as an authoritative router.
 - `dispatch config show`
   Inspect the current explicit backend/model/alias mapping.
 - `dispatch config add-backend|remove-backend`
@@ -122,7 +134,7 @@ Most operational commands support `--json` so a host prompt can treat `dispatch`
 - `dispatch inspect`
   Show task state, pending mailbox questions, and recent events in one call.
 - `dispatch resume`
-  Reuse the persisted session reference and execute the next turn by default.
+  Reuse the persisted session reference for that task and execute the next turn by default.
 - `dispatch status`
   Show the canonical task record.
 - `dispatch events`
@@ -131,6 +143,15 @@ Most operational commands support `--json` so a host prompt can treat `dispatch`
   Show pending mailbox questions across tasks or for a specific task.
 - `dispatch answer`
   Write an answer into the task mailbox.
+
+Hosts should think in task ids and durable state, not raw backend session handles.
+
+Typical conversational behavior:
+
+- start tasks with `run`
+- inspect them with `inspect`
+- answer worker questions with `answer`
+- continue the same task with `resume`
 
 `run` now supports three task modes:
 
@@ -157,6 +178,27 @@ Input sources:
   User-authored plan file
 
 Default task root is always `cwd/.dispatch` unless `--root` is set explicitly.
+
+`resume` is task-centric: the host resumes a task id, and the runtime reuses the correct backend session handle underneath.
+Native session forking may exist inside backend adapters, but it is not currently part of the main public CLI flow.
+
+## Prompt Behavior
+
+The dispatcher prompt is expected to behave like a host-side operator:
+
+- interpret the user's intent and choose the next CLI command deliberately
+- choose backend/model/mode deliberately
+- inspect durable state instead of guessing
+- ask the user focused follow-up questions when the worker is blocked
+- report only operationally relevant status back to the user
+
+The worker prompt is expected to behave like an execution agent:
+
+- read and maintain `plan.md` as a working record
+- keep progress markers honest when using checklist form
+- use `mailbox/` only for worker-initiated clarifying questions
+- write `context.md` before stopping on timeout or blockage
+- leave `plan.md`, output artifacts, and the completion marker in agreement
 
 ## Host Integrations
 
@@ -221,7 +263,7 @@ Supported commands inside `pi`:
 - `/dispatch template --kind audit --output plan.md`
 - `/dispatch ready`
 - `/dispatch config show`
-- `/dispatch set default to sonnet`
+- `/dispatch config set-default sonnet`
 - `/dispatch list`
 - `/dispatch inspect <task-id>`
 - `/dispatch status [task-id]`
@@ -232,7 +274,7 @@ Supported commands inside `pi`:
 - `/dispatch backends`
 
 The extension persists the last selected task in the `pi` session via `appendEntry()`, restores it on session start/tree navigation, and updates `ctx.ui.setStatus()` plus a small widget with the current task state.
-It also routes empty requests to readiness checks and can translate simple config requests such as `set default to sonnet` into the corresponding `dispatch config ...` command.
+Empty `/dispatch` requests still resolve to readiness or the last selected task, but free-form intent parsing is left to the calling model instead of the adapter.
 
 Nothing in the core runtime depends on `pi`. Other hosts can integrate by invoking `dispatch-cli` with `--json` and treating it as a command subsystem.
 
@@ -248,7 +290,7 @@ The repository includes both unit tests and end-to-end tests:
 - discuss-mode draft creation
 - background execution
 - mailbox question -> answer -> resume roundtrip
-- readiness reporting and request routing
+- readiness reporting
 - config mutation commands for explicit backend/model/alias mappings
 
 ## Prompt and Flow Assets

@@ -118,7 +118,6 @@ pub struct ArtifactPaths {
     pub output_file: PathBuf,
     pub context_file: PathBuf,
     pub mailbox_dir: PathBuf,
-    pub sessions_dir: PathBuf,
     pub outputs_dir: PathBuf,
 }
 
@@ -131,7 +130,6 @@ impl ArtifactPaths {
             output_file: root.join("output.md"),
             context_file: root.join("context.md"),
             mailbox_dir: root.join("mailbox"),
-            sessions_dir: root.join("sessions"),
             outputs_dir: root.join("outputs"),
             root,
         }

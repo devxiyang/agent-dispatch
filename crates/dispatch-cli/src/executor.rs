@@ -73,12 +73,7 @@ pub fn execute_plan(
         ),
     )?;
 
-    let session = resolve_session(
-        capture,
-        &stdout_text,
-        &task.workspace_root,
-        Some(task.artifacts.sessions_dir.as_path()),
-    )?;
+    let session = resolve_session(capture, &stdout_text, &task.workspace_root, None)?;
     let success = output.status.success();
     let pending_questions = list_pending_questions(&task.artifacts.mailbox_dir)?;
     let completion_marker = task.artifacts.mailbox_dir.join(".done");
@@ -224,7 +219,6 @@ fn render_exit_status(status: &ExitStatus) -> String {
 mod tests {
     use std::env;
     use std::fs;
-    use std::path::Path;
 
     use dispatch_core::{
         BackendInvocation, BackendKind, DispatchStore, ExecutionMode, SessionCaptureStrategy,
@@ -252,13 +246,16 @@ mod tests {
 
     #[test]
     fn resolves_stdout_json_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let sessions = temp.path().join("sessions");
         let session = resolve_session(
             &SessionCaptureStrategy::StdoutJson {
                 field: "session_id".into(),
             },
             "{\"session_id\":\"sess-1\"}",
-            Path::new("/tmp/workspace"),
-            Some(Path::new("/tmp/sessions")),
+            workspace.as_path(),
+            Some(sessions.as_path()),
         )
         .unwrap()
         .unwrap();
@@ -273,6 +270,8 @@ mod tests {
     #[test]
     fn executes_and_persists_output_artifacts() {
         let root = env::temp_dir().join(format!("dispatch-exec-test-{}", Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
         let store = DispatchStore::new(&root);
         let task = store
             .create_task(TaskDraft {
@@ -284,7 +283,7 @@ mod tests {
                 model: None,
                 execution_mode: ExecutionMode::Auto,
                 plan_body: None,
-                workspace_root: Path::new("/tmp").to_path_buf(),
+                workspace_root: workspace.clone(),
             })
             .unwrap();
 
@@ -298,7 +297,7 @@ mod tests {
                     task.artifacts.output_file.display(),
                 ),
             ],
-            cwd: Path::new("/tmp").to_path_buf(),
+            cwd: workspace,
             env: Default::default(),
             stdin: None,
         };

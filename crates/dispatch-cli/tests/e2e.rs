@@ -23,7 +23,13 @@ backends:
       - |
         prompt="$(cat)"
         session="$1"
-        taskdir="$(dirname "$(dirname "$session")")"
+        mailbox_dir="$(printf '%s\n' "$prompt" | awk '/^- Mailbox: use / { sub(/^- Mailbox: use /, ""); sub(/ for worker-initiated questions only\\.$/, ""); print; exit }')"
+        if [ -n "$mailbox_dir" ]; then
+          taskdir="$(dirname "$mailbox_dir")"
+        else
+          plan_file="$(printf '%s\n' "$prompt" | awk '/^- References: read / { sub(/^- References: read /, ""); sub(/, adapt it into a working plan if needed, then write requested results to .*$/, ""); print; exit }')"
+          taskdir="$(dirname "$plan_file")"
+        fi
         mkdir -p "$taskdir/mailbox"
         if printf '%s' "$prompt" | grep -q 'NEED-ANSWER-E2E'; then
           if [ -f "$taskdir/mailbox/001.answer" ]; then
@@ -125,61 +131,6 @@ fn ready_supports_json_envelope() {
 
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["data"]["default_target"], "fake-pi");
-}
-
-#[test]
-fn route_classifies_warmup_config_and_task_requests() {
-    let (_temp, home, root) = setup_env();
-
-    let warmup: serde_json::Value = serde_json::from_slice(
-        &dispatch_cmd(&home)
-            .args(["--root", root.to_str().unwrap(), "route", "--prompt", ""])
-            .assert()
-            .success()
-            .get_output()
-            .stdout,
-    )
-    .unwrap();
-    assert_eq!(warmup["kind"], "Warmup");
-    assert_eq!(warmup["advisory"], true);
-
-    let config: serde_json::Value = serde_json::from_slice(
-        &dispatch_cmd(&home)
-            .args([
-                "--root",
-                root.to_str().unwrap(),
-                "route",
-                "--prompt",
-                "set default to fake-pi",
-            ])
-            .assert()
-            .success()
-            .get_output()
-            .stdout,
-    )
-    .unwrap();
-    assert_eq!(config["kind"], "ConfigRequest");
-    assert_eq!(config["advisory"], true);
-    assert_eq!(config["suggested_cli_args"][1], "set-default");
-
-    let task: serde_json::Value = serde_json::from_slice(
-        &dispatch_cmd(&home)
-            .args([
-                "--root",
-                root.to_str().unwrap(),
-                "route",
-                "--prompt",
-                "fix the README typo",
-            ])
-            .assert()
-            .success()
-            .get_output()
-            .stdout,
-    )
-    .unwrap();
-    assert_eq!(task["kind"], "TaskRequest");
-    assert_eq!(task["advisory"], true);
-    assert_eq!(task["suggested_mode"], "direct");
 }
 
 #[test]
@@ -441,7 +392,10 @@ fn config_commands_persist_explicit_backend_model_and_alias_mappings() {
 
     assert_eq!(config_json["ok"], true);
     assert_eq!(config_json["data"]["default"], "reviewer");
-    assert_eq!(config_json["data"]["models"]["review-model"]["backend"], "custom-pi");
+    assert_eq!(
+        config_json["data"]["models"]["review-model"]["backend"],
+        "custom-pi"
+    );
 }
 
 #[test]
@@ -594,7 +548,60 @@ fn list_and_inspect_expose_host_friendly_task_views() {
     assert_eq!(inspect_payload["ok"], true);
     assert_eq!(inspect_payload["data"]["task"]["id"], task_id);
     assert!(inspect_payload["data"]["pending_questions"].is_array());
-    assert!(inspect_payload["data"]["recent_events"].as_array().unwrap().len() <= 3);
+    assert!(
+        inspect_payload["data"]["recent_events"]
+            .as_array()
+            .unwrap()
+            .len()
+            <= 3
+    );
+}
+
+#[test]
+fn native_session_files_are_kept_outside_task_root() {
+    let (_temp, home, root) = setup_env();
+
+    let output = dispatch_cmd(&home)
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "run",
+            "--prompt",
+            "Reply with exactly SESSION-E2E and nothing else.",
+            "--model",
+            "fake-pi",
+            "--workspace",
+            ".",
+            "--foreground",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let task_id = value["task_id"].as_str().unwrap();
+    let task_dir = root.join("tasks").join(task_id);
+    let task: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(task_dir.join("task.json")).unwrap()).unwrap();
+
+    assert!(!task_dir.join("sessions").exists());
+    assert_eq!(
+        task["session"]["session_storage"],
+        home.join(".dispatch/runtime/sessions")
+            .join(task_id)
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        task["session"]["locator"]["File"],
+        home.join(".dispatch/runtime/sessions")
+            .join(task_id)
+            .join("session.jsonl")
+            .display()
+            .to_string()
+    );
 }
 
 #[test]
@@ -642,7 +649,10 @@ fn json_questions_uses_structured_host_schema() {
     assert_eq!(questions_payload["ok"], true);
     assert_eq!(questions_payload["data"][0]["task_id"], task_id);
     assert_eq!(questions_payload["data"][0]["status"], "AwaitingUser");
-    assert_eq!(questions_payload["data"][0]["questions"][0]["sequence"], "001");
+    assert_eq!(
+        questions_payload["data"][0]["questions"][0]["sequence"],
+        "001"
+    );
     assert_eq!(
         questions_payload["data"][0]["questions"][0]["question"],
         "What should the worker do next?\n"
@@ -693,11 +703,13 @@ fn backends_json_reports_capabilities_for_hosts() {
 
     assert_eq!(payload["ok"], true);
     assert!(payload["data"].is_array());
-    assert!(payload["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|backend| backend["kind"] == "pi" && backend["capabilities"].is_object()));
+    assert!(
+        payload["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|backend| backend["kind"] == "pi" && backend["capabilities"].is_object())
+    );
 }
 
 #[test]
@@ -713,11 +725,7 @@ fn repository_assets_do_not_contain_machine_specific_absolute_paths() {
         root.join("docs/host-integration-contract.md"),
         root.join("integrations/README.md"),
     ];
-    let forbidden = [
-        "/Users/devxiyang/",
-        "/Users/murph/",
-        "/tmp/dispatch",
-    ];
+    let forbidden = ["/Users/devxiyang/", "/Users/murph/", "/tmp/dispatch"];
 
     for file in files {
         let body = fs::read_to_string(&file).unwrap();

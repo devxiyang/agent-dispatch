@@ -35,7 +35,6 @@ impl DispatchStore {
         self.mkdir(&task_root)?;
         let artifacts = ArtifactPaths::new(task_root.clone());
         self.mkdir(&artifacts.mailbox_dir)?;
-        self.mkdir(&artifacts.sessions_dir)?;
         self.mkdir(&artifacts.outputs_dir)?;
 
         let now = now();
@@ -177,7 +176,11 @@ impl DispatchStore {
         Ok(ids)
     }
 
-    fn write_initial_plan_artifact(&self, task: &TaskRecord, plan_body: Option<&str>) -> Result<()> {
+    fn write_initial_plan_artifact(
+        &self,
+        task: &TaskRecord,
+        plan_body: Option<&str>,
+    ) -> Result<()> {
         let body = plan_body
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| self.default_plan_artifact(task));
@@ -208,7 +211,9 @@ impl DispatchStore {
             task.workspace_root.display()
         ));
         body.push_str("\n## Working Plan\n\n");
-        body.push_str("- Convert this artifact into a working checklist if the task benefits from one.\n");
+        body.push_str(
+            "- Convert this artifact into a working checklist if the task benefits from one.\n",
+        );
         body.push_str("- Update this file as you make progress.\n");
         body.push_str("- Ask the user questions through the mailbox when blocked.\n");
         body.push_str("\n## Output\n\n");
@@ -258,16 +263,15 @@ impl DispatchStore {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
-    use std::fs;
-    use std::path::PathBuf;
-
     use super::DispatchStore;
     use crate::model::{BackendKind, ExecutionMode, TaskDraft, TaskMode, TaskSource};
+    use std::env;
+    use std::fs;
 
     #[test]
     fn creates_persistent_task_layout() {
         let root = env::temp_dir().join(format!("dispatch-core-test-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
         let store = DispatchStore::new(&root);
         let task = store
             .create_task(TaskDraft {
@@ -279,7 +283,7 @@ mod tests {
                 model: Some("gpt-5.3-codex".into()),
                 execution_mode: ExecutionMode::Auto,
                 plan_body: None,
-                workspace_root: PathBuf::from("/tmp/workspace"),
+                workspace_root: workspace,
             })
             .unwrap();
 
@@ -296,6 +300,7 @@ mod tests {
     #[test]
     fn task_updates_do_not_overwrite_worker_owned_plan_artifact() {
         let root = env::temp_dir().join(format!("dispatch-core-test-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
         let store = DispatchStore::new(&root);
         let task = store
             .create_task(TaskDraft {
@@ -307,11 +312,15 @@ mod tests {
                 model: Some("pi-default".into()),
                 execution_mode: ExecutionMode::Auto,
                 plan_body: Some("# User Plan\n\n- [ ] initial step\n".into()),
-                workspace_root: PathBuf::from("/tmp/workspace"),
+                workspace_root: workspace,
             })
             .unwrap();
 
-        fs::write(&task.artifacts.plan_file, "# Worker Revised Plan\n\n- [x] updated step\n").unwrap();
+        fs::write(
+            &task.artifacts.plan_file,
+            "# Worker Revised Plan\n\n- [x] updated step\n",
+        )
+        .unwrap();
         store
             .set_status(task.id, crate::model::TaskStatus::Running, "worker resumed")
             .unwrap();

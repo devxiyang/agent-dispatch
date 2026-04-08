@@ -72,22 +72,6 @@ pub struct ReadySummary {
     pub installed_backends: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
-pub enum RouteKind {
-    Warmup,
-    ConfigRequest,
-    TaskRequest,
-}
-
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
-pub struct RouteSummary {
-    pub advisory: bool,
-    pub kind: RouteKind,
-    pub suggested_mode: Option<String>,
-    pub suggested_cli_args: Option<Vec<String>>,
-    pub reason: String,
-}
-
 pub fn ensure_config() -> Result<DispatchConfig> {
     if let Some(config) = DispatchConfig::load_if_exists()? {
         return Ok(config);
@@ -116,48 +100,6 @@ pub fn readiness_summary() -> Result<ReadySummary> {
         alias_count: config.aliases.len(),
         installed_backends,
     })
-}
-
-pub fn route_request(prompt: &str) -> RouteSummary {
-    let trimmed = prompt.trim();
-    if trimmed.is_empty() {
-        return RouteSummary {
-            advisory: true,
-            kind: RouteKind::Warmup,
-            suggested_mode: None,
-            suggested_cli_args: Some(vec!["ready".into()]),
-            reason: "empty request; the host can treat this as a readiness check".into(),
-        };
-    }
-
-    if let Some(args) = parse_config_request(trimmed) {
-        return RouteSummary {
-            advisory: true,
-            kind: RouteKind::ConfigRequest,
-            suggested_mode: None,
-            suggested_cli_args: Some(args),
-            reason: "request looks like a config operation; the host may run the suggested config command directly".into(),
-        };
-    }
-
-    let suggested_mode = suggest_mode_for_prompt(trimmed);
-    RouteSummary {
-        advisory: true,
-        kind: RouteKind::TaskRequest,
-        suggested_mode: Some(task_mode_name(&suggested_mode).into()),
-        suggested_cli_args: None,
-        reason: match suggested_mode {
-            TaskMode::Discuss => {
-                "request appears exploratory, so the host may prefer a discussion-oriented dispatch".into()
-            }
-            TaskMode::Direct => {
-                "request appears concrete, so the host may prefer direct execution".into()
-            }
-            TaskMode::Plan => {
-                "request appears substantial enough that the host may prefer a persisted plan artifact".into()
-            }
-        },
-    }
 }
 
 pub fn bootstrap_config() -> DispatchConfig {
@@ -272,15 +214,7 @@ pub fn bootstrap_config() -> DispatchConfig {
         }
     }
 
-    let default = if models.contains_key("pi-default") {
-        "pi-default".into()
-    } else if models.contains_key("sonnet") {
-        "sonnet".into()
-    } else if let Some(first) = models.keys().next() {
-        first.clone()
-    } else {
-        "pi-default".into()
-    };
+    let default = choose_default_target(&models);
 
     DispatchConfig {
         default,
@@ -288,6 +222,31 @@ pub fn bootstrap_config() -> DispatchConfig {
         models,
         aliases,
     }
+}
+
+fn choose_default_target(models: &BTreeMap<String, ModelConfig>) -> String {
+    for preferred in [
+        "pi-default",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+        "gpt-5.2",
+        "sonnet",
+        "opus",
+        "haiku",
+        "cursor-default",
+    ] {
+        if models.contains_key(preferred) {
+            return preferred.into();
+        }
+    }
+
+    models
+        .keys()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "pi-default".into())
 }
 
 pub fn resolve_target(
@@ -388,7 +347,7 @@ pub fn prepare_start(
         workspace_root: task.workspace_root.clone(),
         prompt,
         model: resolved.model.clone(),
-        session_dir: task.artifacts.sessions_dir.clone(),
+        session_dir: Some(ensure_session_storage_dir(task.id)?),
         execution_mode: task.execution_mode.clone(),
         backend_config,
     })?)
@@ -610,6 +569,17 @@ fn backend_name_for_kind(kind: &BackendKind) -> &'static str {
     }
 }
 
+pub(crate) fn session_storage_dir_for_task(task_id: Uuid) -> PathBuf {
+    DispatchConfig::session_storage_root().join(task_id.to_string())
+}
+
+fn ensure_session_storage_dir(task_id: Uuid) -> Result<PathBuf> {
+    let path = session_storage_dir_for_task(task_id);
+    fs::create_dir_all(&path)
+        .with_context(|| format!("create session storage directory {}", path.display()))?;
+    Ok(path)
+}
+
 pub fn load_dispatch_input(
     path: PathBuf,
     requested_mode: RequestedTaskMode,
@@ -673,107 +643,6 @@ fn resolve_task_mode(requested_mode: RequestedTaskMode, input: &DispatchInput) -
     }
 }
 
-fn suggest_mode_for_prompt(prompt: &str) -> TaskMode {
-    let lower = prompt.trim().to_lowercase();
-    let discuss_markers = [
-        "help me decide",
-        "let's discuss",
-        "lets discuss",
-        "should we",
-        "should i",
-        "how should",
-        "brainstorm",
-        "think through",
-        "explore options",
-        "not sure",
-        "unclear",
-    ];
-    if discuss_markers.iter().any(|marker| lower.contains(marker)) {
-        return TaskMode::Discuss;
-    }
-
-    let direct_verbs = [
-        "fix",
-        "add",
-        "update",
-        "write",
-        "rename",
-        "remove",
-        "change",
-        "translate",
-        "summarize",
-    ];
-    let word_count = lower.split_whitespace().count();
-    let sentence_count = prompt.matches('.').count() + prompt.matches('\n').count();
-    if word_count <= 18
-        && sentence_count <= 1
-        && direct_verbs.iter().any(|verb| lower.starts_with(verb))
-    {
-        return TaskMode::Direct;
-    }
-
-    TaskMode::Plan
-}
-
-fn parse_config_request(prompt: &str) -> Option<Vec<String>> {
-    let trimmed = prompt.trim();
-    let lower = trimmed.to_lowercase();
-
-    if matches!(lower.as_str(), "show config" | "config show") {
-        return Some(vec!["config".into(), "show".into()]);
-    }
-    if matches!(lower.as_str(), "bootstrap config" | "config bootstrap") {
-        return Some(vec!["config".into(), "bootstrap".into()]);
-    }
-    if let Some(value) = lower
-        .strip_prefix("set default to ")
-        .or_else(|| lower.strip_prefix("use default "))
-    {
-        let original = trimmed[trimmed.len() - value.len()..].trim().to_string();
-        return Some(vec!["config".into(), "set-default".into(), original]);
-    }
-    if let Some(name) = lower
-        .strip_prefix("remove model ")
-        .or_else(|| lower.strip_prefix("delete model "))
-    {
-        return Some(vec![
-            "config".into(),
-            "remove-model".into(),
-            name.trim().into(),
-        ]);
-    }
-    if let Some(name) = lower
-        .strip_prefix("remove alias ")
-        .or_else(|| lower.strip_prefix("delete alias "))
-    {
-        return Some(vec![
-            "config".into(),
-            "remove-alias".into(),
-            name.trim().into(),
-        ]);
-    }
-    if let Some(name) = lower
-        .strip_prefix("remove backend ")
-        .or_else(|| lower.strip_prefix("delete backend "))
-    {
-        return Some(vec![
-            "config".into(),
-            "remove-backend".into(),
-            name.trim().into(),
-        ]);
-    }
-
-    None
-}
-
-fn task_mode_name(mode: &TaskMode) -> &'static str {
-    match mode {
-        TaskMode::Direct => "direct",
-        TaskMode::Plan => "plan",
-        TaskMode::Discuss => "discuss",
-    }
-}
-
 fn extract_goal_from_plan(body: &str) -> Option<String> {
     body.lines()
         .map(str::trim)
@@ -792,13 +661,14 @@ fn is_checklist_line(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use dispatch_core::{BackendConfig, DispatchConfig, ModelConfig, TaskMode};
 
     use super::{
-        DispatchInput, RequestedTaskMode, RouteKind, bootstrap_config, generate_template,
-        load_dispatch_input, resolve_target, resolve_task_mode, route_request,
+        DispatchInput, RequestedTaskMode, bootstrap_config, choose_default_target,
+        generate_template, load_dispatch_input, resolve_target, resolve_task_mode,
     };
 
     #[test]
@@ -894,25 +764,77 @@ mod tests {
             assert_eq!(model.backend, "pi");
             assert!(model.model.is_none());
         }
+        if let Some(backend) = config.backends.get("pi") {
+            assert!(
+                backend
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("{session_file}"))
+            );
+        }
     }
 
     #[test]
-    fn route_request_classifies_warmup_config_and_task_requests() {
-        let warmup = route_request("");
-        assert!(warmup.advisory);
-        assert_eq!(warmup.kind, RouteKind::Warmup);
+    fn choose_default_target_prefers_pi_when_available() {
+        let models = BTreeMap::from([
+            (
+                "pi-default".into(),
+                ModelConfig {
+                    backend: "pi".into(),
+                    model: None,
+                },
+            ),
+            (
+                "gpt-5.4".into(),
+                ModelConfig {
+                    backend: "codex".into(),
+                    model: Some("gpt-5.4".into()),
+                },
+            ),
+            (
+                "sonnet".into(),
+                ModelConfig {
+                    backend: "claude".into(),
+                    model: Some("sonnet".into()),
+                },
+            ),
+        ]);
 
-        let config = route_request("set default to sonnet");
-        assert!(config.advisory);
-        assert_eq!(config.kind, RouteKind::ConfigRequest);
-        assert_eq!(
-            config.suggested_cli_args,
-            Some(vec!["config".into(), "set-default".into(), "sonnet".into()])
-        );
+        assert_eq!(choose_default_target(&models), "pi-default");
+    }
 
-        let task = route_request("fix the README typo");
-        assert!(task.advisory);
-        assert_eq!(task.kind, RouteKind::TaskRequest);
-        assert_eq!(task.suggested_mode.as_deref(), Some("direct"));
+    #[test]
+    fn choose_default_target_prefers_codex_before_claude_when_pi_is_missing() {
+        let models = BTreeMap::from([
+            (
+                "gpt-5.4".into(),
+                ModelConfig {
+                    backend: "codex".into(),
+                    model: Some("gpt-5.4".into()),
+                },
+            ),
+            (
+                "sonnet".into(),
+                ModelConfig {
+                    backend: "claude".into(),
+                    model: Some("sonnet".into()),
+                },
+            ),
+        ]);
+
+        assert_eq!(choose_default_target(&models), "gpt-5.4");
+    }
+
+    #[test]
+    fn choose_default_target_falls_back_to_pi_when_it_is_all_we_have() {
+        let models = BTreeMap::from([(
+            "pi-default".into(),
+            ModelConfig {
+                backend: "pi".into(),
+                model: None,
+            },
+        )]);
+
+        assert_eq!(choose_default_target(&models), "pi-default");
     }
 }

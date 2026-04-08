@@ -43,10 +43,6 @@ enum Commands {
         output: Option<PathBuf>,
     },
     Ready,
-    Route {
-        #[arg(long)]
-        prompt: String,
-    },
     Backends,
     Run {
         #[arg(long)]
@@ -532,10 +528,6 @@ fn run(cli: Cli) -> Result<()> {
             let summary = runtime::readiness_summary()?;
             print_payload(cli.json, &summary, &summary)?;
         }
-        Commands::Route { prompt } => {
-            let summary = runtime::route_request(&prompt);
-            print_payload(cli.json, &summary, &summary)?;
-        }
         Commands::Backends => {
             let mut summaries = Vec::new();
             for backend in dispatch_backends::all_backends() {
@@ -613,19 +605,19 @@ fn run(cli: Cli) -> Result<()> {
             let mut tasks = store
                 .list_task_ids()?
                 .into_iter()
-                    .map(|task_id| {
-                        let task = store.load_task(task_id)?;
-                        let pending = list_pending_questions(&task.artifacts.mailbox_dir)?;
-                        Ok(TaskListItem {
-                            task_id: task.id,
-                            title: task.title,
-                            status: task.status,
-                            backend: task.backend.as_str().into(),
-                            model: task.model,
-                            updated_at: task.updated_at.to_rfc3339(),
-                            pending_question_count: pending.len(),
-                        })
+                .map(|task_id| {
+                    let task = store.load_task(task_id)?;
+                    let pending = list_pending_questions(&task.artifacts.mailbox_dir)?;
+                    Ok(TaskListItem {
+                        task_id: task.id,
+                        title: task.title,
+                        status: task.status,
+                        backend: task.backend.as_str().into(),
+                        model: task.model,
+                        updated_at: task.updated_at.to_rfc3339(),
+                        pending_question_count: pending.len(),
                     })
+                })
                 .collect::<Result<Vec<_>>>()?;
             tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
             print_payload(cli.json, &tasks, &tasks)?;

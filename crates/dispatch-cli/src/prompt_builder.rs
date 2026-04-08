@@ -68,7 +68,6 @@ fn extract_first_text_block(markdown: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::env;
-    use std::path::PathBuf;
 
     use dispatch_core::{
         ArtifactPaths, BackendKind, ExecutionMode, RuntimeCheckpoint, TaskMode, TaskRecord,
@@ -82,6 +81,7 @@ mod tests {
     fn worker_prompt_comes_from_prompt_asset_and_uses_mailbox() {
         let task_id = Uuid::new_v4();
         let task_root = env::temp_dir().join(format!("dispatch-test/{task_id}"));
+        let workspace = env::temp_dir().join(format!("dispatch-workspace/{task_id}"));
         let task = TaskRecord {
             id: task_id,
             title: "Test".into(),
@@ -91,7 +91,7 @@ mod tests {
             backend: BackendKind::Pi,
             model: Some("pi-default".into()),
             execution_mode: ExecutionMode::Auto,
-            workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_root: workspace,
             created_at: now(),
             updated_at: now(),
             status: TaskStatus::Pending,

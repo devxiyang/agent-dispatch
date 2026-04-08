@@ -213,7 +213,7 @@ impl AgentBackend for ClaudeBackend {
             backend: BackendKind::ClaudeCode,
             locator: SessionLocator::Id(Uuid::new_v4().to_string()),
             workspace_root: spec.workspace_root.clone(),
-            session_storage: Some(spec.session_dir.clone()),
+            session_storage: None,
         };
 
         if let Some(config) = &spec.backend_config {
@@ -409,12 +409,16 @@ impl AgentBackend for PiBackend {
     }
 
     fn start_plan(&self, spec: &StartSpec) -> Result<StartPlan> {
-        let session_path = spec.session_dir.join("session.jsonl");
+        let session_dir = spec
+            .session_dir
+            .clone()
+            .ok_or_else(|| BackendError::Unsupported("pi requires a session directory".into()))?;
+        let session_path = session_dir.join("session.jsonl");
         let session = SessionRef {
             backend: BackendKind::Pi,
             locator: SessionLocator::File(session_path),
             workspace_root: spec.workspace_root.clone(),
-            session_storage: Some(spec.session_dir.clone()),
+            session_storage: Some(session_dir),
         };
 
         if let Some(config) = &spec.backend_config {

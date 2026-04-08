@@ -39,8 +39,20 @@ pub struct AliasConfig {
 }
 
 impl DispatchConfig {
+    pub fn dispatch_home() -> PathBuf {
+        home_dir().join(".dispatch")
+    }
+
     pub fn config_path() -> PathBuf {
-        home_dir().join(".dispatch").join("config.yaml")
+        Self::dispatch_home().join("config.yaml")
+    }
+
+    pub fn runtime_dir() -> PathBuf {
+        Self::dispatch_home().join("runtime")
+    }
+
+    pub fn session_storage_root() -> PathBuf {
+        Self::runtime_dir().join("sessions")
     }
 
     pub fn load() -> Result<Self> {

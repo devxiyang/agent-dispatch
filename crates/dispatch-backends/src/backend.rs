@@ -36,7 +36,7 @@ pub struct StartSpec {
     pub workspace_root: PathBuf,
     pub prompt: String,
     pub model: Option<String>,
-    pub session_dir: PathBuf,
+    pub session_dir: Option<PathBuf>,
     pub execution_mode: ExecutionMode,
     pub backend_config: Option<BackendConfig>,
 }

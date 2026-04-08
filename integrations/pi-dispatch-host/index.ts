@@ -90,13 +90,6 @@ interface DispatchReadySummary {
 	installed_backends: string[];
 }
 
-interface DispatchRouteSummary {
-	kind: "Warmup" | "ConfigRequest" | "TaskRequest";
-	suggested_mode?: string | null;
-	suggested_cli_args?: string[] | null;
-	reason: string;
-}
-
 interface DispatchJsonEnvelope<T> {
 	ok: true;
 	data: T;
@@ -328,16 +321,6 @@ async function handleDispatchCommand(
 		return;
 	}
 
-	const route = await routeDispatchRequest(ctx.cwd, rawArgs);
-	if (route?.kind === "Warmup") {
-		await showReady(pi, ctx);
-		return;
-	}
-	if (route?.kind === "ConfigRequest" && route.suggested_cli_args?.length) {
-		await runConfigCommand(pi, ctx, route.suggested_cli_args.slice(1));
-		return;
-	}
-
 	const options = parseRunOptions(tokens, state.root, ctx.cwd);
 	if (!options) {
 		showUsage(ctx);
@@ -451,17 +434,6 @@ async function showReady(
 		},
 		{ triggerTurn: false },
 	);
-}
-
-async function routeDispatchRequest(
-	cwd: string,
-	prompt: string,
-): Promise<DispatchRouteSummary | undefined> {
-	const result = await runDispatchCliJson<DispatchRouteSummary>(cwd, ["route", "--prompt", prompt]);
-	if (!result.ok) {
-		return undefined;
-	}
-	return result.data;
 }
 
 async function runConfigCommand(
@@ -1077,6 +1049,8 @@ function showUsage(ctx: ExtensionCommandContext) {
 			"/dispatch template [--kind generic|feature|bugfix|refactor|audit|research] [--output PATH]",
 			"/dispatch ready",
 			"/dispatch config ...",
+			"/dispatch list",
+			"/dispatch inspect <task-id>",
 			"/dispatch status [task-id]",
 			"/dispatch questions [task-id]",
 			"/dispatch events [task-id]",
